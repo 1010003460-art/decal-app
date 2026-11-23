@@ -1,0 +1,11 @@
+# XcodeGen 生成物，不入库
+Decal.xcodeproj/
+Decal/Info.plist
+
+# 构建产物
+build/
+DerivedData/
+*.xcuserstate
+
+# 系统
+.DS_Store
