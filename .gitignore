@@ -9,3 +9,13 @@ DerivedData/
 
 # 系统
 .DS_Store
+
+# 本地验证素材与产物（体积大，脚本保留即可复现）
+test/*.png
+test/*.jpg
+test/*.json
+cdp_*/
+dist/
+
+# 诊断出图
+diag/*.png

@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>贴花</title>
+<style>
+  :root{ --bg:#111316; --panel:#1b1e23; --line:#2c3138; --txt:#e8eaee; --dim:#8b939f; --acc:#2fb6c8; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--txt);
+    font:14px/1.35 -apple-system,"PingFang SC",system-ui,sans-serif; overscroll-behavior:none; }
+  body{ display:flex; flex-direction:column; height:100%; }
+  #stage{ position:relative; flex:1; min-height:0; overflow:hidden; touch-action:none; background:#0b0c0e; }
+  #gl,#ui{ position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  #gl{ pointer-events:none; }
+  #hint{ position:absolute; left:0; right:0; top:10px; text-align:center; font-size:12.5px; color:#e3e8ee;
+    text-shadow:0 1px 4px rgba(0,0,0,.95); pointer-events:none; transition:opacity .4s; padding:0 18px; }
+  #hint.hide{ opacity:0; }
+  #empty{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:12px; padding:26px; text-align:center; }
+  #empty h1{ font-size:17px; margin:0; font-weight:600; }
+  #empty p{ margin:0; font-size:13px; color:var(--dim); line-height:1.7; }
+  #bar{ background:var(--panel); border-top:1px solid var(--line);
+    padding:8px 12px calc(8px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:7px; }
+  .row{ display:flex; gap:10px; align-items:center; }
+  .sl{ flex:1; min-width:0; }
+  .sl .t{ display:flex; justify-content:space-between; font-size:11px; color:var(--dim); margin-bottom:1px; }
+  .sl .t b{ color:var(--txt); font-weight:500; }
+  input[type=range]{ -webkit-appearance:none; width:100%; height:20px; background:transparent; margin:0; }
+  input[type=range]::-webkit-slider-runnable-track{ height:3px; background:#3a414b; border-radius:2px; }
+  input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:18px; height:18px; border-radius:50%;
+    background:#fff; margin-top:-7.5px; box-shadow:0 1px 3px rgba(0,0,0,.6); }
+  button{ appearance:none; border:1px solid var(--line); background:#252a31; color:var(--txt);
+    font-size:13px; padding:9px 4px; border-radius:9px; font-family:inherit; flex:1; min-width:0; }
+  button:active{ background:#313841; }
+  button.pri{ background:var(--acc); border-color:var(--acc); color:#04222a; font-weight:700; }
+  button.on{ background:#2b3b45; border-color:#3f6a78; color:#8fe3f2; }
+  button:disabled{ opacity:.4; }
+  #toast{ position:fixed; left:50%; bottom:calc(120px + env(safe-area-inset-bottom)); transform:translate(-50%,8px);
+    background:rgba(20,24,28,.95); color:#fff; font-size:13px; padding:9px 16px; border-radius:10px;
+    border:1px solid #3a414b; opacity:0; pointer-events:none; transition:opacity .3s, transform .3s; max-width:80vw; text-align:center; }
+  #toast.show{ opacity:1; transform:translate(-50%,0); }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="ui"></canvas>
+  <div id="hint"></div>
+  <div id="empty">
+    <div style="font-size:38px;opacity:.85">▣</div>
+    <h1>选一张有平面的照片</h1>
+    <p>墙、海报、包装、纸箱、屏幕都行。<br>把四个角拖到那个平面的四个角上，再贴。</p>
+    <button class="pri" style="flex:0 0 auto;padding:12px 30px" id="bPick">选择照片</button>
+  </div>
+</div>
+
+<div id="bar">
+  <div class="row">
+    <div class="sl"><div class="t"><span>大小</span><b id="vSize">30</b></div>
+      <input type="range" id="rSize" min="6" max="90" value="30"></div>
+    <div class="sl"><div class="t"><span>旋转</span><b id="vRot">0°</b></div>
+      <input type="range" id="rRot" min="-60" max="60" value="0"></div>
+  </div>
+  <div class="row">
+    <div class="sl"><div class="t"><span>表面融合</span><b id="vShade">75%</b></div>
+      <input type="range" id="rShade" min="0" max="100" value="75"></div>
+    <div class="sl"><div class="t"><span>接触阴影</span><b id="vCont">50%</b></div>
+      <input type="range" id="rCont" min="0" max="100" value="50"></div>
+  </div>
+  <div class="row">
+    <button id="bPhoto">照片</button>
+    <button id="bDecal">贴图</button>
+    <button id="bCorner" class="on">四点</button>
+    <button id="bDecalMode">贴花</button>
+    <button id="bSave" class="pri">保存</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+<input type="file" id="fPhoto" accept="image/*" hidden>
+<input type="file" id="fDecal" accept="image/*" hidden>
+
+<script>
+'use strict';
+
+// ============================================================================
+// 贴花合成：四点单应 + 逐像素逆采样
+//
+// 为什么不做 3D：贴花只贴在「用户指定的平面」上。平面 → 图像的映射是一个
+// 单应矩阵，数学上完全精确（四角误差 1e-14 px 量级），不需要点云、不需要
+// 深度模型、也不需要收边门限。透视缩短由 H 自带，贴到斜面上自动正确。
+//
+// 与上一版（Vision 找矩形 → 整块展平 → 重画回去）的区别：
+//   1. 只覆盖贴花自身的像素，alpha=0 处保留原图像素（旧版整块区域被重采样）
+//   2. 全程 GPU，一次 draw call，预览和导出一致
+//   3. 加了 L1 光照融合与接触阴影
+// ============================================================================
+
+const $ = id => document.getElementById(id);
+const glc = $('gl'), uic = $('ui'), stage = $('stage');
+
+const S = {
+  img: null, W: 0, H: 0,
+  corners: [],                 // [TL,TR,BR,BL]，图像像素坐标
+  mode: 'corner',              // 'corner' 拖四点 | 'decal' 拖贴花
+  hu: 0.30,                    // 贴花半宽（uv 单位）
+  rot: 0,                      // 度
+  center: { x: 0.5, y: 0.5 },
+  shade: 0.75, contact: 0.5,
+  anchor: 0.2,                 // 锚点处的表面亮度（融合基准）
+  k: 1, ox: 0, oy: 0, dpr: 1, cw: 0, ch: 0,
+};
+let H = null, Hinv = null;
+const J = { u: 1, v: 1 };
+
+// ---------------------------------------------------------------- WebGL 基础
+
+const gl = glc.getContext('webgl2', {
+  antialias: false, alpha: false, depth: false, stencil: false,
+  premultipliedAlpha: false, preserveDrawingBuffer: true,
+  powerPreference: 'high-performance',
+});
+if (!gl) {
+  document.body.innerHTML = '<div style="padding:40px;font:15px -apple-system;color:#eee">' +
+    '这个 WebView 不支持 WebGL2，无法运行。</div>';
+  throw new Error('no webgl2');
+}
+
+const VS = `#version 300 es
+in vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FS = `#version 300 es
+precision highp float;
+
+uniform sampler2D uPhoto;      // 原照片
+uniform sampler2D uDecal;      // 贴花图（带 alpha）
+uniform sampler2D uBlur;       // 照片的低频亮度（灰度），用于表面融合
+uniform vec2  uCanvas;         // 目标画布尺寸（设备像素）
+uniform vec2  uImg;            // 照片像素尺寸
+uniform vec2  uOffset;         // 图像原点在画布上的偏移（设备像素）
+uniform float uScale;          // 图像像素 → 设备像素
+uniform mat3  uHinv;           // 图像像素 → 平面 uv
+uniform vec2  uCenter;         // 贴花中心（uv）
+uniform vec2  uHalf;           // 贴花半宽/半高（uv）
+uniform float uRot;            // 贴花旋转（弧度）
+uniform float uShade;          // 表面融合强度 0..1
+uniform float uContact;        // 接触阴影强度 0..1
+uniform float uContactPx;      // 接触阴影宽度（目标画布设备像素）
+uniform float uAnchor;         // 融合基准亮度
+
+out vec4 fragColor;
+
+void main(){
+  // gl_FragCoord 原点在左下，翻成左上后再映射到图像像素
+  vec2 sp = vec2(gl_FragCoord.x, uCanvas.y - gl_FragCoord.y);
+  vec2 ip = (sp - uOffset) / uScale;
+  vec2 t  = ip / uImg;
+
+  vec3 base = texture(uPhoto, t).rgb;
+
+  // ---- 平面坐标 ----
+  vec3 hq = uHinv * vec3(ip, 1.0);
+  if (abs(hq.z) < 1e-7) { fragColor = vec4(base, 1.0); return; }
+  vec2 uv = hq.xy / hq.z;
+
+  // 到平面边界的距离（uv 单位）；平面外为负 → 自动不画
+  vec2 qd = min(uv, 1.0 - uv);
+  vec2 fa = max(fwidth(uv), vec2(1e-5));
+  float planeFade = smoothstep(0.0, fa.x, qd.x) * smoothstep(0.0, fa.y, qd.y);
+
+  // ---- 贴花局部坐标（-1..1 为贴花框）----
+  vec2 d = uv - uCenter;
+  float c = cos(uRot), s = sin(uRot);
+  vec2 e = vec2(c * d.x + s * d.y, -s * d.x + c * d.y);
+  vec2 n = e / uHalf;
+  float m = max(abs(n.x), abs(n.y));
+
+  float aa = max(fwidth(n.x), fwidth(n.y));
+  float cov = (1.0 - smoothstep(1.0 - aa, 1.0 + aa, m)) * planeFade;
+
+  // ---- 接触阴影：贴花外侧一圈极窄的暗带，让它"压"在表面上 ----
+  float wN = uContactPx * aa;
+  float dd = m - 1.0;
+  float ring = (1.0 - smoothstep(0.0, max(wN, 1e-6), dd)) * smoothstep(-aa * 2.0, aa, dd);
+  base *= 1.0 - uContact * ring;
+
+  // ---- 贴花 + 表面融合 ----
+  vec4 dt = texture(uDecal, clamp(n * 0.5 + 0.5, 0.0, 1.0));
+  float a = dt.a * cov;
+  if (a > 0.002) {
+    float surf = texture(uBlur, t).r;
+    float kk = mix(1.0, clamp(surf / max(uAnchor, 0.02), 0.25, 2.5), uShade);
+    // 只压亮度、慢压色度：直接乘 rgb 会让暗部的字发灰发闷，像污渍
+    float L = dot(dt.rgb, vec3(0.2126, 0.7152, 0.0722));
+    vec3 paint = vec3(L) * kk + (dt.rgb - vec3(L)) * pow(kk, 0.42);
+    base = mix(base, clamp(paint, 0.0, 1.0), a);
+  }
+
+  fragColor = vec4(base, 1.0);
+}`;
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(sh);
+    document.body.insertAdjacentHTML('beforeend',
+      '<pre style="position:fixed;bottom:0;left:0;right:0;max-height:40%;overflow:auto;' +
+      'background:#600;color:#fff;font:11px monospace;padding:8px;z-index:99">' + log + '</pre>');
+    throw new Error(log);
+  }
+  return sh;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const UN = {};
+['uPhoto', 'uDecal', 'uBlur', 'uCanvas', 'uImg', 'uOffset', 'uScale', 'uHinv',
+ 'uCenter', 'uHalf', 'uRot', 'uShade', 'uContact', 'uContactPx', 'uAnchor']
+  .forEach(n => UN[n] = gl.getUniformLocation(prog, n));
+
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+function newTex() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  return t;
+}
+function upload(tex, src) {
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+}
+
+const texPhoto = newTex(), texDecal = newTex(), texBlur = newTex();
+
+// ---------------------------------------------------------------- 单应矩阵
+// 与 Decal/Homography.swift、verify_homography.mjs 同一套算法（8×8 高斯消元）
+
+function solveHop(src, dst) {
+  const a = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [u, v] = dst[i];
+    a[i * 2]     = [x, y, 1, 0, 0, 0, -u * x, -u * y, u];
+    a[i * 2 + 1] = [0, 0, 0, x, y, 1, -v * x, -v * y, v];
+  }
+  for (let col = 0; col < 8; col++) {
+    let piv = col;
+    for (let r = col + 1; r < 8; r++) if (Math.abs(a[r][col]) > Math.abs(a[piv][col])) piv = r;
+    if (Math.abs(a[piv][col]) < 1e-12) return null;
+    if (piv !== col) { const t = a[piv]; a[piv] = a[col]; a[col] = t; }
+    const dv = a[col][col];
+    for (let c = col; c <= 8; c++) a[col][c] /= dv;
+    for (let r = 0; r < 8; r++) {
+      if (r === col) continue;
+      const f = a[r][col];
+      if (f === 0) continue;
+      for (let c = col; c <= 8; c++) a[r][c] -= f * a[col][c];
+    }
+  }
+  const h = [];
+  for (let i = 0; i < 8; i++) h.push(a[i][8]);
+  h.push(1);
+  return h;
+}
+
+function invHop(m) {
+  const [a, b, c, d, e, f, g, h, i] = m;
+  const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g;
+  const det = a * A + b * B + c * C;
+  if (Math.abs(det) < 1e-12) return null;
+  return [A / det, (c * h - b * i) / det, (b * f - c * e) / det,
+          B / det, (a * i - c * g) / det, (c * d - a * f) / det,
+          C / det, (b * g - a * h) / det, (a * e - b * d) / det];
+}
+
+function mapHop(m, x, y) {
+  const w = m[6] * x + m[7] * y + m[8];
+  if (Math.abs(w) < 1e-12) return null;
+  return [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w];
+}
+
+// WebGL 要列主序：把行主序数组转置压平
+const toGL = h => [h[0], h[3], h[6], h[1], h[4], h[7], h[2], h[5], h[8]];
+
+// ---------------------------------------------------------------- 贴花尺寸
+// 贴花用 uv 单位描述，但 uv 在两个方向上的"每单位多少像素"不同（平面本身
+// 有长宽比，还有透视）。用锚点处的雅可比把贴花图自身的宽高比还原回来，
+// 这样一张 1024×340 的贴纸放上去就是 3:1，不会被平面长宽比拉扁。
+
+function rebuildH() {
+  H = solveHop([[0, 0], [1, 0], [1, 1], [0, 1]], S.corners);
+  Hinv = H ? invHop(H) : null;
+}
+
+function recomputeJ() {
+  if (!H) return;
+  const e = 1e-3;
+  const p0 = mapHop(H, S.center.x, S.center.y);
+  const p1 = mapHop(H, S.center.x + e, S.center.y);
+  const p2 = mapHop(H, S.center.x, S.center.y + e);
+  if (!p0 || !p1 || !p2) return;
+  J.u = Math.max(1e-6, Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / e);
+  J.v = Math.max(1e-6, Math.hypot(p2[0] - p0[0], p2[1] - p0[1]) / e);
+}
+
+function decalTextureAspect() {
+  const c = $('fDecal')._canvas || defaultDecal;
+  return c.height / Math.max(1, c.width);
+}
+
+function decalHalf() {
+  let hu = S.hu;
+  let hv = hu * (J.u / J.v) * decalTextureAspect();
+  const mx = Math.max(hu, hv);
+  if (mx > 0.46) { const f = 0.46 / mx; hu *= f; hv *= f; }   // 别让贴花超出平面
+  return [hu, hv];
+}
+
+// ---------------------------------------------------------------- 低频亮度
+// L1 的光照融合只要「表面的低频明暗」。128px 灰度图 + 三次盒式模糊就够，
+// 高频细节（砖缝、布纹）不该进贴花，否则字会变脏。
+
+let blurC = null, blurCtx = null;
+function buildBlur() {
+  const bw = 128, bh = Math.max(1, Math.round(128 * S.H / Math.max(1, S.W)));
+  const c = document.createElement('canvas');
+  c.width = bw; c.height = bh;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(S.img, 0, 0, bw, bh);
+  const id = x.getImageData(0, 0, bw, bh);
+  const p = id.data;
+  const g = new Float32Array(bw * bh);
+  for (let i = 0, k = 0; i < p.length; i += 4, k++)
+    g[k] = (0.2126 * p[i] + 0.7152 * p[i + 1] + 0.0722 * p[i + 2]) / 255;
+
+  // 可分离盒式模糊 ×3 ≈ 高斯
+  const tmp = new Float32Array(bw * bh);
+  const R = Math.max(2, Math.round(Math.min(bw, bh) * 0.06));
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < bh; y++) {
+      for (let x2 = 0; x2 < bw; x2++) {
+        let s = 0, n = 0;
+        for (let d = -R; d <= R; d++) {
+          const xx = x2 + d;
+          if (xx < 0 || xx >= bw) continue;
+          s += g[y * bw + xx]; n++;
+        }
+        tmp[y * bw + x2] = s / n;
+      }
+    }
+    for (let x2 = 0; x2 < bw; x2++) {
+      for (let y = 0; y < bh; y++) {
+        let s = 0, n = 0;
+        for (let d = -R; d <= R; d++) {
+          const yy = y + d;
+          if (yy < 0 || yy >= bh) continue;
+          s += tmp[yy * bw + x2]; n++;
+        }
+        g[y * bw + x2] = s / n;
+      }
+    }
+  }
+  for (let i = 0, k = 0; i < p.length; i += 4, k++) {
+    const v = Math.max(0, Math.min(255, Math.round(g[k] * 255)));
+    p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255;
+  }
+  x.putImageData(id, 0, 0);
+  blurC = c; blurCtx = x;
+  upload(texBlur, c);
+}
+
+function recomputeAnchor() {
+  if (!blurC) { S.anchor = 0.2; return; }
+  const p = mapHop(H, S.center.x, S.center.y);
+  if (!p || !isFinite(p[0]) || !isFinite(p[1])) return;   // 四点退化时不更新
+  const bx = Math.max(0, Math.min(blurC.width - 1, Math.round(p[0] / S.W * (blurC.width - 1))));
+  const by = Math.max(0, Math.min(blurC.height - 1, Math.round(p[1] / S.H * (blurC.height - 1))));
+  const d = blurCtx.getImageData(bx, by, 1, 1).data;
+  S.anchor = Math.max(0.03, d[0] / 255);
+}
+
+// ---------------------------------------------------------------- 默认贴花
+
+let defaultDecal = null;
+function makeDefaultDecal() {
+  const w = 1024, h = 340;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  const r = 40, pad = 8;
+  x.beginPath();
+  x.moveTo(pad + r, pad);
+  x.lineTo(w - pad - r, pad); x.quadraticCurveTo(w - pad, pad, w - pad, pad + r);
+  x.lineTo(w - pad, h - pad - r); x.quadraticCurveTo(w - pad, h - pad, w - pad - r, h - pad);
+  x.lineTo(pad + r, h - pad); x.quadraticCurveTo(pad, h - pad, pad, h - pad - r);
+  x.lineTo(pad, pad + r); x.quadraticCurveTo(pad, pad, pad + r, pad);
+  x.closePath();
+  x.fillStyle = 'rgba(13,150,175,0.96)';
+  x.fill();
+  x.lineWidth = 7; x.strokeStyle = 'rgba(255,255,255,0.9)'; x.stroke();
+  x.fillStyle = '#fff';
+  x.font = '700 152px -apple-system,"PingFang SC",system-ui,sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText('MAX', w / 2, h / 2 + 8);
+  return c;
+}
+
+// ---------------------------------------------------------------- 布局
+
+function layout() {
+  const cw = stage.clientWidth, ch = stage.clientHeight;
+  if (!cw || !ch) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  S.dpr = dpr; S.cw = cw; S.ch = ch;
+  glc.width = Math.round(cw * dpr); glc.height = Math.round(ch * dpr);
+  uic.width = glc.width; uic.height = glc.height;
+  if (S.img) {
+    S.k = Math.min(cw / S.W, ch / S.H);
+    S.ox = (cw - S.W * S.k) / 2;
+    S.oy = (ch - S.H * S.k) / 2;
+  }
+}
+
+// ---------------------------------------------------------------- 渲染
+
+function contactImgPx() {
+  // 用「图像像素」定义阴影宽度，预览和全分辨率导出才一致
+  return 4.0 * Math.max(S.W, S.H) / 1000;
+}
+
+function drawAt(o) {
+  gl.useProgram(prog);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texPhoto); gl.uniform1i(UN.uPhoto, 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDecal); gl.uniform1i(UN.uDecal, 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texBlur);  gl.uniform1i(UN.uBlur, 2);
+
+  gl.uniform2f(UN.uCanvas, o.w, o.h);
+  gl.uniform2f(UN.uImg, S.W, S.H);
+  gl.uniform2f(UN.uOffset, o.ox, o.oy);
+  gl.uniform1f(UN.uScale, o.k);
+  gl.uniformMatrix3fv(UN.uHinv, false, toGL(Hinv));
+  gl.uniform2f(UN.uCenter, S.center.x, S.center.y);
+  const [hu, hv] = decalHalf();
+  gl.uniform2f(UN.uHalf, hu, hv);
+  gl.uniform1f(UN.uRot, S.rot * Math.PI / 180);
+  gl.uniform1f(UN.uShade, S.shade);
+  gl.uniform1f(UN.uContact, S.contact);
+  gl.uniform1f(UN.uContactPx, contactImgPx() * o.k);
+  gl.uniform1f(UN.uAnchor, S.anchor);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function render() {
+  if (!S.img || !glc.width) return;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, glc.width, glc.height);
+  if (!Hinv) { gl.clearColor(0.043, 0.047, 0.055, 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+  drawAt({ w: glc.width, h: glc.height, ox: S.ox * S.dpr, oy: S.oy * S.dpr, k: S.k * S.dpr });
+}
+
+function toScreen(p) { return [p[0] * S.k + S.ox, p[1] * S.k + S.oy]; }
+function toImage(x, y) { return [(x - S.ox) / S.k, (y - S.oy) / S.k]; }
+
+function decalQuadScreen() {
+  const [hu, hv] = decalHalf();
+  const c = Math.cos(S.rot * Math.PI / 180), s = Math.sin(S.rot * Math.PI / 180);
+  return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {
+    const du = a * hu * c - b * hv * s;
+    const dv = a * hu * s + b * hv * c;
+    const q = mapHop(H, S.center.x + du, S.center.y + dv);
+    return q ? toScreen(q) : [0, 0];
+  });
+}
+
+function drawUI() {
+  const c = uic.getContext('2d');
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, uic.width, uic.height);
+  if (!S.img || !H) return;
+  const d = S.dpr;
+  const sc = p => [p[0] * d, p[1] * d];
+
+  // 平面框
+  c.lineWidth = 1.6 * d;
+  c.strokeStyle = 'rgba(122,232,250,.92)';
+  c.beginPath();
+  S.corners.forEach((p, i) => {
+    const q = sc(toScreen(p));
+    i ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]);
+  });
+  c.closePath(); c.stroke();
+
+  // 贴花虚线框（只在贴花模式显示，避免挡视线）
+  if (S.mode === 'decal') {
+    const q4 = decalQuadScreen().map(sc);
+    c.setLineDash([5 * d, 4 * d]);
+    c.lineWidth = 1.5 * d;
+    c.strokeStyle = 'rgba(255,255,255,.85)';
+    c.beginPath();
+    q4.forEach((q, i) => i ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]));
+    c.closePath(); c.stroke();
+    c.setLineDash([]);
+  }
+
+  // 四角手柄
+  S.corners.forEach(p => {
+    const q = sc(toScreen(p));
+    c.beginPath();
+    c.arc(q[0], q[1], (S.mode === 'corner' ? 12 : 8) * d, 0, 6.2832);
+    c.fillStyle = S.mode === 'corner' ? 'rgba(47,182,200,.95)' : 'rgba(47,182,200,.42)';
+    c.fill();
+    c.lineWidth = 2.2 * d; c.strokeStyle = '#fff'; c.stroke();
+  });
+}
+
+// ---------------------------------------------------------------- 交互
+
+let drag = null;
+
+$('ui').addEventListener('pointerdown', e => {
+  if (!S.img || !H) return;
+  const r = uic.getBoundingClientRect();
+  const ip = toImage(e.clientX - r.left, e.clientY - r.top);
+  e.preventDefault();
+  try { uic.setPointerCapture(e.pointerId); } catch (_) {}
+
+  if (S.mode === 'corner') {
+    let bi = -1, bd = 1e9;
+    S.corners.forEach((c, i) => {
+      const dd = Math.hypot(c[0] - ip[0], c[1] - ip[1]);
+      if (dd < bd) { bd = dd; bi = i; }
+    });
+    if (bd * S.k <= 38) { drag = { type: 'corner', i: bi }; return; }
+  } else {
+    if (pointInPoly(ip, decalQuadScreen().map(p => toImage(p[0], p[1])))) {
+      const uv0 = mapHop(Hinv, ip[0], ip[1]);
+      if (uv0) drag = { type: 'decal', img: ip, uv: uv0, c0: { ...S.center } };
+      return;
+    }
+  }
+});
+
+$('ui').addEventListener('pointermove', e => {
+  if (!drag) return;
+  const r = uic.getBoundingClientRect();
+  const ip = toImage(e.clientX - r.left, e.clientY - r.top);
+
+  if (drag.type === 'corner') {
+    // 限制在照片范围内，别把角拖到画布外面丢了
+    drag.i;
+    S.corners[drag.i] = [clamp(ip[0], 0, S.W), clamp(ip[1], 0, S.H)];
+    rebuild();
+  } else if (drag.type === 'decal') {
+    const uv1 = mapHop(Hinv, ip[0], ip[1]);
+    if (!uv1) return;
+    S.center.x = clamp(drag.c0.x + (uv1[0] - drag.uv[0]), -0.2, 1.2);
+    S.center.y = clamp(drag.c0.y + (uv1[1] - drag.uv[1]), -0.2, 1.2);
+    recomputeJ(); recomputeAnchor(); drawUI(); render();
+  }
+});
+
+function endDrag() { drag = null; }
+$('ui').addEventListener('pointerup', endDrag);
+$('ui').addEventListener('pointercancel', endDrag);
+
+function pointInPoly(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > p[1]) !== (yj > p[1]) &&
+        p[0] < (xj - xi) * (p[1] - yi) / (yj - yi + 1e-12) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+function rebuild() {
+  rebuildH();
+  if (H) { recomputeJ(); recomputeAnchor(); }
+  drawUI(); render();
+}
+
+// ---------------------------------------------------------------- 滑杆 / 按钮
+
+function syncSliders() {
+  $('rSize').value = Math.round(S.hu * 100);
+  $('vSize').textContent = Math.round(S.hu * 100);
+  $('rRot').value = Math.round(S.rot);
+  $('vRot').textContent = Math.round(S.rot) + '°';
+  $('rShade').value = Math.round(S.shade * 100);
+  $('vShade').textContent = Math.round(S.shade * 100) + '%';
+  $('rCont').value = Math.round(S.contact * 100);
+  $('vCont').textContent = Math.round(S.contact * 100) + '%';
+}
+
+$('rSize').addEventListener('input', e => {
+  S.hu = (+e.target.value) / 100;
+  syncSliders(); recomputeJ(); drawUI(); render();
+});
+$('rRot').addEventListener('input', e => {
+  S.rot = +e.target.value;
+  syncSliders(); drawUI(); render();
+});
+$('rShade').addEventListener('input', e => {
+  S.shade = (+e.target.value) / 100;
+  syncSliders(); render();
+});
+$('rCont').addEventListener('input', e => {
+  S.contact = (+e.target.value) / 100;
+  syncSliders(); render();
+});
+
+function setMode(m) {
+  S.mode = m;
+  $('bCorner').classList.toggle('on', m === 'corner');
+  $('bDecalMode').classList.toggle('on', m === 'decal');
+  hint(m === 'corner' ? '把四个角拖到平面的四个角上' : '拖动贴花移动位置，用上面的滑杆调大小和角度');
+  drawUI();
+}
+$('bCorner').onclick = () => setMode('corner');
+$('bDecalMode').onclick = () => setMode('decal');
+
+$('bPick').onclick = () => $('fPhoto').click();
+$('bPhoto').onclick = () => $('fPhoto').click();
+$('bDecal').onclick = () => $('fDecal').click();
+
+$('fPhoto').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  const im = new Image();
+  im.onload = () => {
+    setImage(im);
+    URL.revokeObjectURL(url);
+    e.target.value = '';
+  };
+  im.onerror = () => toast('这张图片读不出来');
+  im.src = url;
+});
+
+$('fDecal').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  const im = new Image();
+  im.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = im.naturalWidth; c.height = im.naturalHeight;
+    c.getContext('2d').drawImage(im, 0, 0);
+    $('fDecal')._canvas = c;
+    upload(texDecal, c);
+    URL.revokeObjectURL(url);
+    e.target.value = '';
+    recomputeJ(); drawUI(); render();
+    toast('贴图已替换');
+  };
+  im.onerror = () => toast('这张图片读不出来');
+  im.src = url;
+});
+
+// ---------------------------------------------------------------- 载入照片
+
+function setImage(img) {
+  S.img = img;
+  S.W = img.naturalWidth || img.width;
+  S.H = img.naturalHeight || img.height;
+  upload(texPhoto, img);
+  buildBlur();
+
+  const ix = S.W * 0.04, iy = S.H * 0.04;
+  S.corners = [[ix, iy], [S.W - ix, iy], [S.W - ix, S.H - iy], [ix, S.H - iy]];
+  S.center = { x: 0.5, y: 0.5 };
+  S.hu = 0.30; S.rot = 0;
+
+  $('empty').style.display = 'none';
+  layout();
+  rebuildH();
+  recomputeJ();
+  recomputeAnchor();
+  syncSliders();
+  drawUI();
+  render();
+  setMode('corner');
+  hint('四个角已放在画面边缘，把它们拖到你真正要贴的那个平面上');
+}
+
+let hintTimer = null;
+function hint(txt, ms = 4200) {
+  const el = $('hint');
+  el.textContent = txt;
+  el.classList.remove('hide');
+  clearTimeout(hintTimer);
+  if (ms > 0) hintTimer = setTimeout(() => el.classList.add('hide'), ms);
+}
+
+let toastTimer = null;
+function toast(t) {
+  const el = $('toast');
+  el.textContent = t;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+// ---------------------------------------------------------------- 导出
+
+async function exportImage(quality = 0.95) {
+  if (!S.img || !Hinv) throw new Error('还没有照片或四个角无效');
+
+  // 输出的图像像素 → 目标像素
+  const MAXD = 4096;
+  let w = S.W, h = S.H;
+  if (Math.max(w, h) > MAXD) {
+    const f = MAXD / Math.max(w, h);
+    w = Math.round(w * f); h = Math.round(h * f);
+  }
+  // 保证不超过 GPU 纹理上限
+  const lim = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  if (Math.max(w, h) > lim) {
+    const f = lim / Math.max(w, h);
+    w = Math.floor(w * f); h = Math.floor(h * f);
+  }
+
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (st !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb); gl.deleteTexture(tex);
+    throw new Error('导出缓冲创建失败 ' + st);
+  }
+
+  gl.viewport(0, 0, w, h);
+  drawAt({ w, h, ox: 0, oy: 0, k: w / S.W });
+
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb);
+  gl.deleteTexture(tex);
+  gl.viewport(0, 0, glc.width, glc.height);
+
+  // readPixels 是下往上，翻转成上往下
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const cx = out.getContext('2d');
+  const img = cx.createImageData(w, h);
+  const row = w * 4;
+  for (let y = 0; y < h; y++) {
+    const s = (h - 1 - y) * row, d = y * row;
+    img.data.set(px.subarray(s, s + row), d);
+  }
+  cx.putImageData(img, 0, 0);
+
+  drawUI(); render();     // 恢复预览
+  return quality === 'png' ? out.toDataURL('image/png') : out.toDataURL('image/jpeg', quality);
+}
+
+$('bSave').onclick = async () => {
+  const btn = $('bSave');
+  btn.disabled = true;
+  const t0 = performance.now();
+  try {
+    const url = await exportImage();
+    const ms = Math.round(performance.now() - t0);
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.save) {
+      window.webkit.messageHandlers.save.postMessage({ dataURL: url, ms });
+    } else {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'decal.jpg';
+      a.click();
+      toast('已生成图片（' + ms + 'ms）');
+    }
+  } catch (err) {
+    toast(err.message || '保存失败');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// ---------------------------------------------------------------- 尺寸变化
+
+if (window.ResizeObserver) {
+  new ResizeObserver(() => {
+    layout();
+    if (S.img) { drawUI(); render(); }
+  }).observe(stage);
+} else {
+  addEventListener('resize', () => { layout(); if (S.img) { drawUI(); render(); } });
+}
+
+// ---------------------------------------------------------------- 启动
+
+document.fonts && document.fonts.ready.then(() => {
+  defaultDecal = makeDefaultDecal();
+  upload(texDecal, defaultDecal);
+  if (S.img) render();
+});
+
+defaultDecal = makeDefaultDecal();
+upload(texDecal, defaultDecal);
+layout();
+gl.clearColor(0.043, 0.047, 0.055, 1);
+gl.clear(gl.COLOR_BUFFER_BIT);
+
+// 调试接口（本地验证用，正式运行不受影响）
+window.__dbg = {
+  load: url => new Promise((res, rej) => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => { setImage(im); res([S.W, S.H]); };
+    im.onerror = () => rej(new Error('load fail'));
+    im.src = url;
+  }),
+  corners: arr => { S.corners = arr.map(p => [p[0], p[1]]); rebuild(); },
+  decal: o => {
+    if (o.center) S.center = Array.isArray(o.center)
+      ? { x: o.center[0], y: o.center[1] }
+      : { x: o.center.x, y: o.center.y };
+    if (o.hu != null) S.hu = o.hu;
+    if (o.rot != null) S.rot = o.rot;
+    if (o.shade != null) S.shade = o.shade;
+    if (o.contact != null) S.contact = o.contact;
+    syncSliders(); recomputeJ(); recomputeAnchor(); drawUI(); render();
+  },
+  grid: () => {
+    const w = 1024, h = 340;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgba(0,140,190,0.92)'; x.fillRect(0, 0, w, h);
+    const nx = 16, ny = 5;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if ((i + j) % 2) continue;
+      x.fillStyle = 'rgba(255,255,255,0.92)';
+      x.fillRect(i * w / nx + 2, j * h / ny + 2, w / nx - 4, h / ny - 4);
+    }
+    $('fDecal')._canvas = c;
+    upload(texDecal, c);
+    recomputeJ(); drawUI(); render();
+  },
+  export: q => exportImage(q == null ? 0.95 : q),
+  setDecalURL: url => new Promise((res, rej) => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = im.naturalWidth; c.height = im.naturalHeight;
+      c.getContext('2d').drawImage(im, 0, 0);
+      $('fDecal')._canvas = c;
+      upload(texDecal, c);
+      recomputeJ(); drawUI(); render();
+      res([c.width, c.height]);
+    };
+    im.onerror = () => rej(new Error('decal load fail'));
+    im.src = url;
+  }),
+  state: () => ({
+    W: S.W, H: S.H, k: S.k, dpr: S.dpr,
+    corners: S.corners, center: S.center, half: decalHalf(),
+    anchor: S.anchor, J: { u: J.u, v: J.v }, mode: S.mode,
+  }),
+};
+window.__ready = true;
+// 原生侧（存相册成功/失败）回话的入口
+window.__nativeResult = t => toast(String(t || ''));
+</script>
+</body>
+</html>

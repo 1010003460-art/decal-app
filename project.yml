@@ -16,7 +16,12 @@ targets:
     type: application
     platform: iOS
     sources:
+      # decal.html 单独作为资源入包（放在 Bundle 根，Swift 用 forResource 取）
       - path: Decal
+        excludes:
+          - "decal.html"
+      - path: Decal/decal.html
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wancai.decal
