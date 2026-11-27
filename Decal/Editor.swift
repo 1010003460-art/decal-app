@@ -1,3 +1,4 @@
+import ImageIO
 import Metal
 import MetalKit
 import Photos
@@ -122,7 +123,7 @@ final class Editor: ObservableObject {
         sd.tAddressMode = .clampToEdge
         sampler = dev.makeSamplerState(descriptor: sd)
 
-        setDecal(Editor.makeDefaultDecal())
+        if let def = Editor.makeDefaultDecal() { setDecalCG(def) }
     }
 
     func attach(_ v: MTKView) { view = v }
@@ -130,11 +131,11 @@ final class Editor: ObservableObject {
 
     // ---------------------------------------------------------------- 照片
 
-    func setPhoto(_ img: UIImage) {
-        guard let cg = img.cgImage else { toast = "这张图片读不出来"; return }
+    func setPhoto(_ data: Data) {
+        guard let cg = Editor.decode(data, maxPixel: 4096) else { toast = "这张图片读不出来"; return }
         imgW = Double(cg.width)
         imgH = Double(cg.height)
-        photoTex = tex(img)
+        photoTex = tex(cg)
         buildLowLum(cg)
 
         let ix = imgW * 0.04, iy = imgH * 0.04
@@ -152,17 +153,34 @@ final class Editor: ObservableObject {
         hint = "四个角已放在画面边缘，把它们拖到你真正要贴的那个平面上"
     }
 
-    func setDecal(_ img: UIImage) {
-        if let cg = img.cgImage, cg.width > 0 {
-            decalAspect = Double(cg.height) / Double(cg.width)
-            decalTex = tex(img)
-        }
+    func setDecal(_ data: Data) {
+        if let cg = Editor.decode(data, maxPixel: 2048) { setDecalCG(cg) }
         recomputeJ()
         invalidate()
     }
 
-    private func tex(_ img: UIImage) -> MTLTexture? {
-        guard let cg = img.cgImage, let loader else { return nil }
+    private func setDecalCG(_ cg: CGImage) {
+        decalAspect = Double(cg.height) / Double(cg.width)
+        decalTex = tex(cg)
+    }
+
+    /// 解码并「烘焙」EXIF 方向，同时把最长边压到 maxPixel。
+    ///
+    /// 不直接用 `UIImage.cgImage`：那是没转过的原始像素，手机竖拍（Orientation 6/8）
+    /// 会横躺且宽高颠倒；而 CGImageSource 的 thumbnail 路径能一次把方向转正 + 降采样，
+    /// 顺带省掉一张全尺寸中间图（4800 万像素的图直接吃 190MB）。
+    private static func decode(_ data: Data, maxPixel: Int) -> CGImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let opt: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opt as CFDictionary)
+    }
+
+    private func tex(_ cg: CGImage) -> MTLTexture? {
+        guard let loader else { return nil }
         // SRGB:false → 保持 8bit 数值，跟 WebGL 版颜色一致
         let opt: [MTKTextureLoader.Option: Any] = [.SRGB: NSNumber(value: false)]
         return try? loader.newTexture(cgImage: cg, options: opt)
@@ -324,7 +342,10 @@ final class Editor: ObservableObject {
                 let d = hypot(Double(c.x - ip.x), Double(c.y - ip.y))
                 if d < bd { bd = d; bi = i }
             }
-            if bd * Double(k) <= 38 { drag = .corner(bi) }
+            if bd * Double(k) <= 38 {
+                drag = .corner(bi)
+                if !hint.isEmpty { hint = "" }   // 一动手就把提示收掉，别一直压在照片上
+            }
         } else {
             if pointInPoly(ip, decalQuadImage()), let uv0 = hInv?.map(Double(ip.x), Double(ip.y)) {
                 drag = .decal(uv0: uv0, c0: center)
@@ -518,7 +539,7 @@ final class Editor: ObservableObject {
 
     // ---------------------------------------------------------------- 默认贴花
 
-    static func makeDefaultDecal() -> UIImage {
+    static func makeDefaultDecal() -> CGImage? {
         let w: CGFloat = 1024, h: CGFloat = 340
         let fmt = UIGraphicsImageRendererFormat.default()
         fmt.scale = 1
@@ -544,7 +565,7 @@ final class Editor: ObservableObject {
             let size = s.size(withAttributes: attrs)
             s.draw(in: CGRect(x: 0, y: (h - size.height) / 2 + 8, width: w, height: size.height),
                    withAttributes: attrs)
-        }
+        }.cgImage
     }
 }
 

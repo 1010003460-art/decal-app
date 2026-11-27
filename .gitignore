@@ -23,3 +23,6 @@ diag/*.png
 # CI 产物下载目录
 dl/
 dist2/
+
+# 项目记忆
+.workbuddy/

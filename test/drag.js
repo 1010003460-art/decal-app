@@ -1,8 +1,8 @@
 // 真机以外的交互验证：用真实指针事件拖四个角、拖贴花、点保存。
 // 只信"输入事件 → 状态变化"，不看代码。
-const http = require('http'), { spawn } = require('child_process'), fs = require('fs');
+const http = require('http'), { spawn } = require('child_process'), fs = require('fs'), os = require('os'), path = require('path');
 const CHROME = 'C:\\Users\\93044\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe';
-const PORT = 9368, BASE = 'http://127.0.0.1:8801', OUT = 'D:\\wbtmp\\ios_decal\\test';
+const PORT = 9368, BASE = 'http://127.0.0.1:8801', OUT = __dirname;
 const getJSON = p => new Promise((res, rej) => {
   http.get({ host: '127.0.0.1', port: PORT, path: p }, r => {
     let b = ''; r.on('data', d => b += d); r.on('end', () => res(JSON.parse(b)));
@@ -13,7 +13,7 @@ const getJSON = p => new Promise((res, rej) => {
   const child = spawn(CHROME, [
     `--remote-debugging-port=${PORT}`, '--headless=new', '--window-size=430,932',
     '--no-first-run', '--enable-unsafe-swiftshader',
-    `--user-data-dir=D:\\wbtmp\\ios_decal\\cdp_${Date.now()}`, 'about:blank',
+    `--user-data-dir=${path.join(os.tmpdir(), 'cdp_' + Date.now())}`, 'about:blank',
   ], { stdio: 'ignore' });
   let tabs;
   for (let i = 0; i < 50; i++) { try { tabs = await getJSON('/json'); break; } catch (e) { await new Promise(r => setTimeout(r, 250)); } }

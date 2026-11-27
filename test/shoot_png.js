@@ -2,9 +2,9 @@
 // 自己做逆采样 + 双线性，合成一张参考图；再和页面导出的 PNG 逐像素比。
 // 一致 ⇒ 着色器的坐标、y 方向、uv 顺序、宽高比修正都是对的。
 
-const http = require('http'), { spawn } = require('child_process'), fs = require('fs');
+const http = require('http'), { spawn } = require('child_process'), fs = require('fs'), os = require('os'), path = require('path');
 const CHROME = 'C:\\Users\\93044\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe';
-const PORT = 9367, BASE = 'http://127.0.0.1:8801', OUT = 'D:\\wbtmp\\ios_decal\\test';
+const PORT = 9367, BASE = 'http://127.0.0.1:8801', OUT = __dirname;
 const getJSON = p => new Promise((res, rej) => {
   http.get({ host: '127.0.0.1', port: PORT, path: p }, r => {
     let b = ''; r.on('data', d => b += d); r.on('end', () => res(JSON.parse(b)));
@@ -21,7 +21,7 @@ const CASES = [
   const child = spawn(CHROME, [
     `--remote-debugging-port=${PORT}`, '--headless=new', '--window-size=430,932',
     '--no-first-run', '--enable-unsafe-swiftshader',
-    '--user-data-dir=D:\\wbtmp\\ios_decal\\cdp_' + Date.now(), 'about:blank',
+    '--user-data-dir=' + path.join(os.tmpdir(), 'cdp_' + Date.now()), 'about:blank',
   ], { stdio: 'ignore' });
   let tabs;
   for (let i = 0; i < 50; i++) { try { tabs = await getJSON('/json'); break; } catch (e) { await new Promise(r => setTimeout(r, 250)); } }

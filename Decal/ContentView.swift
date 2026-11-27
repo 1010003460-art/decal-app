@@ -49,17 +49,19 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { v in
-                        if ed.isTouching { ed.touchMove(v.location) }
-                        else { ed.touchStart(v.location) }
-                    }
-                    .onEnded { _ in ed.touchEnd() }
-            )
+            // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉
+            .gesture(dragGesture, including: ed.hasPhoto ? .all : .none)
             .onAppear { ed.setStage(geo.size) }
             .onChange(of: geo.size) { _, s in ed.setStage(s) }
         }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { v in
+                if ed.isTouching { ed.touchMove(v.location) } else { ed.touchStart(v.location) }
+            }
+            .onEnded { _ in ed.touchEnd() }
     }
 
     private var emptyState: some View {
@@ -185,9 +187,8 @@ struct ContentView: View {
     private func load(_ item: PhotosPickerItem?, isPhoto: Bool) {
         guard let item else { return }
         Task { @MainActor in
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let img = UIImage(data: data) {
-                if isPhoto { ed.setPhoto(img) } else { ed.setDecal(img) }
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                if isPhoto { ed.setPhoto(data) } else { ed.setDecal(data) }
             } else {
                 ed.toast = "这张图片读不出来"
             }
