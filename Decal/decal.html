@@ -138,7 +138,6 @@ precision highp float;
 
 uniform sampler2D uPhoto;      // 原照片
 uniform sampler2D uDecal;      // 贴花图（带 alpha）
-uniform sampler2D uBlur;       // 照片的低频亮度（灰度），用于表面融合
 uniform vec2  uCanvas;         // 目标画布尺寸（设备像素）
 uniform vec2  uImg;            // 照片像素尺寸
 uniform vec2  uOffset;         // 图像原点在画布上的偏移（设备像素）
@@ -161,6 +160,10 @@ void main(){
   vec2 t  = ip / uImg;
 
   vec3 base = texture(uPhoto, t).rgb;
+  // 表面亮度 = 这个像素本身的亮度（不是模糊过的低频图）。
+  // 用模糊图会把砖缝、标签边缘、皱褶全抹平，融合就只剩整体调色，看着像没效果；
+  // 用原像素才能让表面纹理透过贴花显出来 —— 这也是 Web 端实测下来最像印刷的做法。
+  float surf = dot(base, vec3(0.2126, 0.7152, 0.0722));
 
   // ---- 平面坐标 ----
   vec3 hq = uHinv * vec3(ip, 1.0);
@@ -192,7 +195,6 @@ void main(){
   vec4 dt = texture(uDecal, clamp(n * 0.5 + 0.5, 0.0, 1.0));
   float a = dt.a * cov;
   if (a > 0.002) {
-    float surf = texture(uBlur, t).r;
     float kk = mix(1.0, clamp(surf / max(uAnchor, 0.02), 0.25, 2.5), uShade);
     // 只压亮度、慢压色度：直接乘 rgb 会让暗部的字发灰发闷，像污渍
     float L = dot(dt.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -225,7 +227,7 @@ if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgram
 gl.useProgram(prog);
 
 const UN = {};
-['uPhoto', 'uDecal', 'uBlur', 'uCanvas', 'uImg', 'uOffset', 'uScale', 'uHinv',
+['uPhoto', 'uDecal', 'uCanvas', 'uImg', 'uOffset', 'uScale', 'uHinv',
  'uCenter', 'uHalf', 'uRot', 'uShade', 'uContact', 'uContactPx', 'uAnchor']
   .forEach(n => UN[n] = gl.getUniformLocation(prog, n));
 
@@ -253,7 +255,7 @@ function upload(tex, src) {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
 }
 
-const texPhoto = newTex(), texDecal = newTex(), texBlur = newTex();
+const texPhoto = newTex(), texDecal = newTex();
 
 // ---------------------------------------------------------------- 单应矩阵
 // 与 Decal/Homography.swift、verify_homography.mjs 同一套算法（8×8 高斯消元）
@@ -387,8 +389,7 @@ function buildBlur() {
     p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255;
   }
   x.putImageData(id, 0, 0);
-  blurC = c; blurCtx = x;
-  upload(texBlur, c);
+  blurC = c; blurCtx = x;   // 只用来取"锚点处的局部平均亮度"，不参与渲染
 }
 
 function recomputeAnchor() {
@@ -454,7 +455,6 @@ function drawAt(o) {
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texPhoto); gl.uniform1i(UN.uPhoto, 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDecal); gl.uniform1i(UN.uDecal, 1);
-  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texBlur);  gl.uniform1i(UN.uBlur, 2);
 
   gl.uniform2f(UN.uCanvas, o.w, o.h);
   gl.uniform2f(UN.uImg, S.W, S.H);
