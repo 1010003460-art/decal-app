@@ -686,6 +686,9 @@ struct MetalView: UIViewRepresentable {
         v.clearColor = MTLClearColorMake(0.043, 0.047, 0.055, 1)
         v.enableSetNeedsDisplay = true
         v.isPaused = true
+        // 画布本身不需要自己的交互：拖拽/捏合都由上层 SwiftUI 手势处理。
+        // 留着默认的 true，这个铺满全屏的 UIView 会参与 UIKit 命中测试，把上层控件的点击吃掉。
+        v.isUserInteractionEnabled = false
         v.delegate = context.coordinator
         ed.attach(v)
         return v

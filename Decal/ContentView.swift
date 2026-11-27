@@ -29,6 +29,8 @@ struct ContentView: View {
         }
         .background(cBg)
         .preferredColorScheme(.dark)
+        // 空态挂在整棵树的最上层，不放进画布 ZStack —— 物理上不可能被画布手势抢走点击
+        .overlay { if !ed.hasPhoto { emptyState } }
         .overlay(alignment: .bottom) { toastView }
         .onChange(of: photoItem) { _, item in load(item, isPhoto: true) }
         .onChange(of: decalItem) { _, item in load(item, isPhoto: false) }
@@ -47,23 +49,27 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 MetalView(ed: ed)
+                // 手势单独一层，只在有照片时存在。
+                // 曾经把 DragGesture(minimumDistance: 0) 挂在整个 ZStack 上、用 including: .none 关掉：
+                // minimumDistance 0 是"手指一落下就识别"，它会先赢下手势竞争再把点击吞掉，
+                // including 只停回调、不退出竞争 —— 于是空态的「选择照片」「拍一张」点了没反应（真机症状）。
+                // 现在没照片时这层根本不存在，按钮不可能被抢。
+                if ed.hasPhoto && !ed.busy {
+                    Color.clear
+                        .contentShape(Rectangle())   // 透明色本身不参与命中，要显式给形状
+                        .gesture(dragGesture)
+                        .simultaneousGesture(magnifyGesture)
+                }
                 Handles(ed: ed).allowsHitTesting(false)
-                if !ed.hasPhoto { emptyState }
                 if let err = ed.initError {
                     Text(err).font(.system(size: 13))
                         .foregroundStyle(.white).padding(24)
                         .multilineTextAlignment(.center)
+                        .allowsHitTesting(false)
                 }
                 hintView
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-            // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉；
-            // busy（解码/导出）时也关掉，导出读的是同一份状态，别让拖动改到一半
-            .gesture(dragGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
-            // 捏合与单指拖同时挂着：SwiftUI 里并存的两个手势只有 simultaneousGesture 能都收到。
-            // including 与上面一致 —— 空态时这层手势会跟「选择照片」「拍一张」抢点击
-            .simultaneousGesture(magnifyGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
             .onAppear { ed.setStage(geo.size) }
             .onChange(of: geo.size) { _, s in ed.setStage(s) }
         }
@@ -92,7 +98,7 @@ struct ContentView: View {
                 .multilineTextAlignment(.center).lineSpacing(4)
             HStack(spacing: 10) {
                 PhotosPicker(selection: $photoItem, matching: .images) {
-                    Text("选择照片").primaryBG()
+                    Text("选择照片").primaryBG().contentShape(Rectangle())
                 }
                 Button { openCamera() } label: {
                     Text("拍一张")
@@ -100,6 +106,7 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20).padding(.vertical, 12)
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(cLine))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
