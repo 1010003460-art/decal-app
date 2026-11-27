@@ -4,6 +4,7 @@ import MetalKit
 import Photos
 import SwiftUI
 import UIKit
+import Vision
 
 // ============================================================================
 // 贴花渲染的全部状态与数学，都在这里。
@@ -82,6 +83,10 @@ final class Editor: ObservableObject {
     private var drag: DragOp?
     private var touched = false
 
+    // 触觉：拖到角上给一次轻震，存相册成功/失败给成功/失败反馈
+    private let impact = UIImpactFeedbackGenerator(style: .light)
+    private let notify = UINotificationFeedbackGenerator()
+
     // 锚点亮度用的低分辨率灰度图（替代 Web 版的 128px 盒式模糊）
     private var lowLum: [Double] = []
     private var lowW = 32
@@ -137,11 +142,13 @@ final class Editor: ObservableObject {
         // 48MP HEIC 的 ImageIO 解码能到 500ms，放主线程 = 点完选图界面僵住没反馈
         DispatchQueue.global(qos: .userInitiated).async {
             let cg = Editor.decode(data, maxPixel: 4096)
-            DispatchQueue.main.async { self.applyPhoto(cg) }
+            // 顺手让 Vision 找画面里最明显的矩形：找到就直接把四角摆上去
+            let quad = cg.flatMap { Editor.detectQuad($0) }
+            DispatchQueue.main.async { self.applyPhoto(cg, quad) }
         }
     }
 
-    private func applyPhoto(_ cg: CGImage?) {
+    private func applyPhoto(_ cg: CGImage?, _ quad: [CGPoint]?) {
         defer { busy = false }
         guard let cg else { toast = "这张图片读不出来"; return }
         imgW = Double(cg.width)
@@ -149,11 +156,7 @@ final class Editor: ObservableObject {
         photoTex = tex(cg)
         buildLowLum(cg)
 
-        let ix = imgW * 0.04, iy = imgH * 0.04
-        corners = [CGPoint(x: ix, y: iy),
-                   CGPoint(x: imgW - ix, y: iy),
-                   CGPoint(x: imgW - ix, y: imgH - iy),
-                   CGPoint(x: ix, y: imgH - iy)]
+        corners = quad ?? defaultCorners()
         center = CGPoint(x: 0.5, y: 0.5)
         hu = 0.30
         rot = 0
@@ -161,7 +164,35 @@ final class Editor: ObservableObject {
         layout()
         rebuild()
         mode = .corner
-        hint = "四个角已放在画面边缘，把它们拖到你真正要贴的那个平面上"
+        hint = quad != nil ? "已自动找到平面，四角可以再微调"
+                           : "四个角在画面边缘，拖到你真正要贴的那个平面"
+    }
+
+    private func defaultCorners() -> [CGPoint] {
+        let ix = imgW * 0.04, iy = imgH * 0.04
+        return [CGPoint(x: ix, y: iy),
+                CGPoint(x: imgW - ix, y: iy),
+                CGPoint(x: imgW - ix, y: imgH - iy),
+                CGPoint(x: ix, y: imgH - iy)]
+    }
+
+    /// Vision 找最明显的矩形，返回四个「图像像素」角点（左上原点）。
+    /// observation 是归一化 + 左下原点，转像素要翻 y。
+    private static func detectQuad(_ cg: CGImage) -> [CGPoint]? {
+        let req = VNDetectRectanglesRequest()
+        req.maximumObservations = 1
+        req.minimumConfidence = 0.55
+        req.minimumAspectRatio = 0.15
+        req.quadratureTolerance = 35
+        do {
+            try VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])
+        } catch {
+            return nil
+        }
+        guard let r = req.results?.first else { return nil }
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * w, y: (1 - p.y) * h) }
+        return [px(r.topLeft), px(r.topRight), px(r.bottomRight), px(r.bottomLeft)]
     }
 
     func setDecal(_ data: Data) {
@@ -233,6 +264,18 @@ final class Editor: ObservableObject {
             recomputeAnchor()
         }
         invalidate()
+    }
+
+    /// 拖乱了 / 自动找的平面不对时的一键退路：四角回满幅、贴花回中心、大小角度归位
+    func reset() {
+        guard hasPhoto, imgW > 0, imgH > 0 else { return }
+        corners = defaultCorners()
+        center = CGPoint(x: 0.5, y: 0.5)
+        hu = 0.30
+        rot = 0
+        rebuild()
+        impact.impactOccurred()
+        toast = "已重置"
     }
 
     private func recomputeJ() {
@@ -357,6 +400,7 @@ final class Editor: ObservableObject {
             }
             if bd * Double(k) <= 38 {
                 drag = .corner(bi)
+                impact.impactOccurred()          // 抓到角了，给一次轻震
                 if !hint.isEmpty { hint = "" }   // 一动手就把提示收掉，别一直压在照片上
             }
         } else {
@@ -560,6 +604,7 @@ final class Editor: ObservableObject {
                     self?.busy = false
                     self?.toast = ok ? "已存入相册 · \(ms)ms"
                                      : (err?.localizedDescription ?? "保存失败")
+                    self?.notify.notificationOccurred(ok ? .success : .error)
                 }
             }
         }

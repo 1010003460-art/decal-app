@@ -140,6 +140,10 @@ struct ContentView: View {
                 PhotosPicker(selection: $decalItem, matching: .images) {
                     Text("贴图").chipBG()
                 }
+                Button { ed.reset() } label: {
+                    Text("重置").chipBG()
+                }
+                .buttonStyle(.plain)
                 Button { ed.setMode(.corner) } label: {
                     Text("四点").chipBG(ed.mode == .corner)
                 }
