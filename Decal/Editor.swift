@@ -88,6 +88,8 @@ final class Editor: ObservableObject {
     /// 捏合开始那一刻的 hu。每帧都重置基准会让缩放速率失真（越捏越快/越慢）
     private var pinchBase: Double?
     private(set) var pinching = false
+    /// 贴花已经顶到平面边界（用来只在刚撞上时震一次，不要一路抖）
+    private var hitEdge = false
 
     // 触觉：拖到角上给一次轻震，存相册成功/失败给成功/失败反馈
     private let impact = UIImpactFeedbackGenerator(style: .light)
@@ -168,9 +170,15 @@ final class Editor: ObservableObject {
         hasPhoto = true
         layout()
         rebuild()
-        mode = .corner
-        hint = quad != nil ? "已自动找到平面，四角可以再微调"
-                           : "四个角在画面边缘，拖到你真正要贴的那个平面"
+        // 自动找到平面就直接进「拖贴花」：用户选完照片下一步一定是摆贴花，
+        // 停在「四点」模式里拖哪儿都没反应，看起来就像整个 App 卡死了
+        if quad != nil {
+            mode = .decal
+            hint = "已自动贴到平面 · 拖贴花挪位置，拖四角微调"
+        } else {
+            mode = .corner
+            hint = "四个角在画面边缘，先拖到你要贴的那个平面上"
+        }
     }
 
     private func defaultCorners() -> [CGPoint] {
@@ -329,9 +337,17 @@ final class Editor: ObservableObject {
 
     /// uv 单位下的贴花半宽/半高。用雅可比还原贴花图自身宽高比，
     /// 这样 1024×340 的贴纸贴上去还是 3:1，不被平面长宽比拉扁。
+    ///
+    /// hu 的语义是「较长那条边的一半」：宽扁贴花（比如 3:1）如果按短边算，
+    /// 长边早就顶到 0.46 上限，滑杆后面一多半行程是死的 —— 真机上就是「拖到某个位置就没反应」。
     func decalHalf() -> (Double, Double) {
+        let ratio = (Double(jac.x) / Double(jac.y)) * decalAspect   // b / a
         var a = hu
-        var b = hu * (Double(jac.x) / Double(jac.y)) * decalAspect
+        var b = hu * ratio
+        if ratio > 1 {          // 长边在 b 上：让 b 就是 hu，a 按比例缩回去
+            b = hu
+            a = hu / ratio
+        }
         let mx = max(a, b)
         if mx > Editor.huRange.upperBound {
             let f = Editor.huRange.upperBound / mx
@@ -419,9 +435,10 @@ final class Editor: ObservableObject {
 
     func setMode(_ m: Tool) {
         mode = m
+        // 两个模式都能拖角点；「贴花」模式额外允许拖动贴花本身
         hint = m == .corner
-            ? "把四个角拖到平面的四个角上"
-            : "拖动贴花移动位置，双指捏合或上面的滑杆调大小"
+            ? "拖四个蓝点把平面框住 · 拖贴花请切到「贴花」"
+            : "拖贴花挪位置 · 角点也能直接拖"
         invalidate()
     }
 
@@ -448,22 +465,26 @@ final class Editor: ObservableObject {
         guard hasPhoto, hMat != nil else { return }
         let ip = toImage(loc)
 
-        if mode == .corner {
-            var bi = -1
-            var bd = Double.greatestFiniteMagnitude
-            for (i, c) in corners.enumerated() {
-                let d = hypot(Double(c.x - ip.x), Double(c.y - ip.y))
-                if d < bd { bd = d; bi = i }
-            }
-            if bd * Double(k) <= 38 {
-                drag = .corner(bi)
-                impact.impactOccurred()          // 抓到角了，给一次轻震
-                if !hint.isEmpty { hint = "" }   // 一动手就把提示收掉，别一直压在照片上
-            }
-        } else {
-            if pointInPoly(ip, decalQuadImage()), let uv0 = hInv?.map(Double(ip.x), Double(ip.y)) {
-                drag = .decal(uv0: uv0, c0: center)
-            }
+        // 角点优先：手指落在角点附近就是要拖角，不管当前是哪个模式。
+        // 以前只在「四点」模式下能拖角，切到「贴花」后点框就"没反应"了。
+        var bi = -1
+        var bd = Double.greatestFiniteMagnitude
+        for (i, c) in corners.enumerated() {
+            let d = hypot(Double(c.x - ip.x), Double(c.y - ip.y))
+            if d < bd { bd = d; bi = i }
+        }
+        if bd * Double(k) <= 44 {
+            drag = .corner(bi)
+            impact.impactOccurred()          // 抓到角了，给一次轻震
+            if !hint.isEmpty { hint = "" }   // 一动手就把提示收掉，别一直压在照片上
+            return
+        }
+
+        // 没点中角点：只有「贴花」模式才拖贴花，避免在调四角时把贴花拖跑
+        if mode == .decal,
+           pointInPoly(ip, decalQuadImage()),
+           let uv0 = hInv?.map(Double(ip.x), Double(ip.y)) {
+            drag = .decal(uv0: uv0, c0: center)
         }
     }
 
@@ -487,8 +508,16 @@ final class Editor: ObservableObject {
 
         case .decal(let uv0, let c0):
             guard let uv1 = hInv?.map(Double(ip.x), Double(ip.y)) else { return }
-            center = CGPoint(x: min(max(Double(c0.x) + Double(uv1.x) - Double(uv0.x), -0.2), 1.2),
-                             y: min(max(Double(c0.y) + Double(uv1.y) - Double(uv0.y), -0.2), 1.2))
+            let nx = Double(c0.x) + Double(uv1.x) - Double(uv0.x)
+            let ny = Double(c0.y) + Double(uv1.y) - Double(uv0.y)
+            // 贴花只能在平面内挪：出了平面 shader 直接裁掉，看起来像"贴花没了"。
+            // 所以这里夹住，撞到边界震一下 —— 让人知道是到头了，不是卡住了。
+            let cx = min(max(nx, -0.2), 1.2)
+            let cy = min(max(ny, -0.2), 1.2)
+            let atEdge = (cx != nx) || (cy != ny)
+            if atEdge && !hitEdge { impact.impactOccurred() }
+            hitEdge = atEdge
+            center = CGPoint(x: cx, y: cy)
             recomputeJ()
             // 拖动中不更新锚点：基准跟着位置变，整张贴花会忽明忽暗。松手再算（见 touchEnd）
             invalidate()
@@ -498,6 +527,7 @@ final class Editor: ObservableObject {
     func touchEnd() {
         drag = nil
         touched = false
+        hitEdge = false
         // 捏合被打断（来电/切后台）不一定有 onEnded，复位放这里一处管住
         pinchBase = nil
         pinching = false
