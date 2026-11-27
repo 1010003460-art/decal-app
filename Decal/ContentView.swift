@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 
 // ============================================================================
 // 界面层：画布（Metal）+ 手柄（Canvas 叠加）+ 底部面板（SwiftUI 原生控件）
@@ -18,6 +19,7 @@ struct ContentView: View {
     @StateObject private var ed = Editor()
     @State private var photoItem: PhotosPickerItem?
     @State private var decalItem: PhotosPickerItem?
+    @State private var showCamera = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -33,6 +35,10 @@ struct ContentView: View {
         .onChange(of: ed.toast) { _, t in autoHide(t) }
         // 手势被来电/切后台打断时不会走 onEnded，touched 会永久卡住 → 之后再也拖不动
         .onChange(of: scenePhase) { _, p in if p != .active { ed.touchEnd() } }
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraPicker { data in ed.setPhoto(data) }
+                .ignoresSafeArea()
+        }
     }
 
     // ---------------------------------------------------------------- 画布
@@ -55,6 +61,8 @@ struct ContentView: View {
             // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉；
             // busy（解码/导出）时也关掉，导出读的是同一份状态，别让拖动改到一半
             .gesture(dragGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
+            // 捏合与单指拖同时挂着：SwiftUI 里并存的两个手势只有 simultaneousGesture 能都收到
+            .simultaneousGesture(magnifyGesture)
             .onAppear { ed.setStage(geo.size) }
             .onChange(of: geo.size) { _, s in ed.setStage(s) }
         }
@@ -68,6 +76,12 @@ struct ContentView: View {
             .onEnded { _ in ed.touchEnd() }
     }
 
+    private var magnifyGesture: some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.01)
+            .onChanged { v in ed.pinch(Double(v.magnification)) }
+            .onEnded { _ in ed.touchEnd() }      // 复位走同一个入口
+    }
+
     private var emptyState: some View {
         VStack(spacing: 12) {
             Text("▣").font(.system(size: 38)).opacity(0.85)
@@ -75,11 +89,18 @@ struct ContentView: View {
             Text("墙、海报、包装、纸箱、屏幕都行。\n把四个角拖到那个平面的四个角上，再贴。")
                 .font(.system(size: 13)).foregroundStyle(cDim)
                 .multilineTextAlignment(.center).lineSpacing(4)
-            PhotosPicker(selection: $photoItem, matching: .images) {
-                Text("选择照片").font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color(red: 0.016, green: 0.133, blue: 0.165))
-                    .padding(.horizontal, 30).padding(.vertical, 12)
-                    .background(cAccent).clipShape(RoundedRectangle(cornerRadius: 10))
+            HStack(spacing: 10) {
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Text("选择照片").primaryBG()
+                }
+                Button { openCamera() } label: {
+                    Text("拍一张")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20).padding(.vertical, 12)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(cLine))
+                }
+                .buttonStyle(.plain)
             }
             .padding(.top, 4)
         }
@@ -125,8 +146,7 @@ struct ContentView: View {
     private var controlBar: some View {
         VStack(spacing: 7) {
             HStack(spacing: 10) {
-                // 上限 0.46 = decalHalf() 里防出平面的 clamp，再往上拖画面不会有变化
-                slider("大小", value: pbind(\.hu), range: 0.06...0.46) { "\(Int($0 * 100))" }
+                slider("大小", value: pbind(\.hu), range: Editor.huRange) { "\(Int($0 * 100))" }
                 slider("旋转", value: pbind(\.rot), range: -60...60) { "\(Int($0))°" }
             }
             HStack(spacing: 10) {
@@ -137,6 +157,10 @@ struct ContentView: View {
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     Text("照片").chipBG()
                 }
+                Button { openCamera() } label: {
+                    Text("拍").chipBG()
+                }
+                .buttonStyle(.plain)
                 PhotosPicker(selection: $decalItem, matching: .images) {
                     Text("贴图").chipBG()
                 }
@@ -192,7 +216,16 @@ struct ContentView: View {
                 set: { ed[keyPath: path] = $0; ed.invalidate() })
     }
 
-    // ---------------------------------------------------------------- 选图
+    // ---------------------------------------------------------------- 选图 / 拍照
+
+    private func openCamera() {
+        // 模拟器、iPad 无相机、家长控制禁用相机时 isSourceTypeAvailable 为 false
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            ed.toast = "这台设备没有可用相机"
+            return
+        }
+        showCamera = true
+    }
 
     private func load(_ item: PhotosPickerItem?, isPhoto: Bool) {
         guard let item else { return }
@@ -255,9 +288,62 @@ private struct Handles: View {
     }
 }
 
+// ---------------------------------------------------------------- 相机
+
+/// 只为拍一张照片：系统相机、单张、拍完把 JPEG 数据交给 setPhoto。
+/// 复用现有的解码链路，EXIF 烘焙和 Vision 自动找平面都不用重写。
+private struct CameraPicker: UIViewControllerRepresentable {
+    let onData: (Data) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let p = UIImagePickerController()
+        p.sourceType = .camera
+        p.cameraCaptureMode = .photo
+        p.delegate = context.coordinator
+        return p
+    }
+
+    func updateUIViewController(_ p: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coord { Coord(onData: onData, close: { dismiss() }) }
+
+    final class Coord: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        private let onData: (Data) -> Void
+        private let close: () -> Void
+
+        init(onData: @escaping (Data) -> Void, close: @escaping () -> Void) {
+            self.onData = onData
+            self.close = close
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            close()
+            guard let img = info[.originalImage] as? UIImage else { return }
+            // 12MP 的 JPEG 编码在主线程要 100ms 上下，关掉相机的瞬间会顿一下
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let d = img.jpegData(compressionQuality: 0.95) else { return }
+                DispatchQueue.main.async { self.onData(d) }
+            }
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { close() }
+    }
+}
+
 // ---------------------------------------------------------------- 小样式
 
 private extension View {
+    /// 空态主按钮
+    func primaryBG() -> some View {
+        self
+            .font(.system(size: 15, weight: .bold))
+            .foregroundStyle(Color(red: 0.016, green: 0.133, blue: 0.165))
+            .padding(.horizontal, 26).padding(.vertical, 12)
+            .background(cAccent).clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
     func chipBG(_ on: Bool = false) -> some View {
         self
             .font(.system(size: 13))

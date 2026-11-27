@@ -42,6 +42,10 @@ private enum DragOp {
 
 final class Editor: ObservableObject {
 
+    /// 贴花半宽的合法区间：下限是看得见，上限是 decalHalf() 里防出平面的 clamp。
+    /// 滑杆和双指捏合都指这里，免得两处各写一套数字。
+    static let huRange: ClosedRange<Double> = 0.06...0.46
+
     // ---- UI 绑定 ----
     @Published var mode: Tool = .corner
     @Published var hu: Double = 0.30
@@ -82,6 +86,9 @@ final class Editor: ObservableObject {
     private weak var view: MTKView?
     private var drag: DragOp?
     private var touched = false
+    /// 捏合开始那一刻的 hu。每帧都重置基准会让缩放速率失真（越捏越快/越慢）
+    private var pinchBase: Double?
+    private(set) var pinching = false
 
     // 触觉：拖到角上给一次轻震，存相册成功/失败给成功/失败反馈
     private let impact = UIImpactFeedbackGenerator(style: .light)
@@ -294,8 +301,8 @@ final class Editor: ObservableObject {
         var a = hu
         var b = hu * (Double(jac.x) / Double(jac.y)) * decalAspect
         let mx = max(a, b)
-        if mx > 0.46 {
-            let f = 0.46 / mx
+        if mx > Editor.huRange.upperBound {
+            let f = Editor.huRange.upperBound / mx
             a *= f
             b *= f
         }
@@ -382,11 +389,29 @@ final class Editor: ObservableObject {
         mode = m
         hint = m == .corner
             ? "把四个角拖到平面的四个角上"
-            : "拖动贴花移动位置，用上面的滑杆调大小和角度"
+            : "拖动贴花移动位置，双指捏合或上面的滑杆调大小"
+        invalidate()
+    }
+
+    /// 双指捏合改贴花大小。DragGesture 只会跟第一根手指，所以捏合时中心不会跟着漂；
+    /// 但第一根手指落下时可能已经触发过一次 touchStart，这里在 pinch 开始时把它清掉。
+    func pinch(_ magnification: Double) {
+        guard hasPhoto, !busy, hMat != nil else { return }
+        if pinchBase == nil {
+            pinchBase = hu
+            pinching = true
+            drag = nil
+            touched = false
+            impact.impactOccurred()
+            if !hint.isEmpty { hint = "" }
+        }
+        hu = min(Editor.huRange.upperBound,
+                 max(Editor.huRange.lowerBound, (pinchBase ?? hu) * Double(magnification)))
         invalidate()
     }
 
     func touchStart(_ loc: CGPoint) {
+        guard !pinching else { return }
         touched = true
         guard hasPhoto, hMat != nil else { return }
         let ip = toImage(loc)
@@ -441,6 +466,9 @@ final class Editor: ObservableObject {
     func touchEnd() {
         drag = nil
         touched = false
+        // 捏合被打断（来电/切后台）不一定有 onEnded，复位放这里一处管住
+        pinchBase = nil
+        pinching = false
         // 松手才定锚点，避免拖动时整张贴花亮度跳
         if hasPhoto, hMat != nil { recomputeAnchor(); invalidate() }
     }

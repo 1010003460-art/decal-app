@@ -40,6 +40,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSPhotoLibraryAddUsageDescription: 保存处理后的照片到你的相册。
         NSPhotoLibraryUsageDescription: 从相册选择照片进行编辑。
+        NSCameraUsageDescription: 现场拍一张照片，直接把贴花贴到墙面上。
         ITSAppUsesNonExemptEncryption: false
 
 schemes:
