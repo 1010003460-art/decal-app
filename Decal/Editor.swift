@@ -132,7 +132,18 @@ final class Editor: ObservableObject {
     // ---------------------------------------------------------------- 照片
 
     func setPhoto(_ data: Data) {
-        guard let cg = Editor.decode(data, maxPixel: 4096) else { toast = "这张图片读不出来"; return }
+        guard !busy else { toast = "上一张还在处理，稍等"; return }
+        busy = true
+        // 48MP HEIC 的 ImageIO 解码能到 500ms，放主线程 = 点完选图界面僵住没反馈
+        DispatchQueue.global(qos: .userInitiated).async {
+            let cg = Editor.decode(data, maxPixel: 4096)
+            DispatchQueue.main.async { self.applyPhoto(cg) }
+        }
+    }
+
+    private func applyPhoto(_ cg: CGImage?) {
+        defer { busy = false }
+        guard let cg else { toast = "这张图片读不出来"; return }
         imgW = Double(cg.width)
         imgH = Double(cg.height)
         photoTex = tex(cg)
@@ -361,8 +372,14 @@ final class Editor: ObservableObject {
         case .corner(let i):
             guard corners.indices.contains(i) else { return }
             // 限制在照片范围内，别把角拖到画布外丢了
-            corners[i] = CGPoint(x: min(max(ip.x, 0), CGFloat(imgW)),
-                                 y: min(max(ip.y, 0), CGFloat(imgH)))
+            let nc = CGPoint(x: min(max(ip.x, 0), CGFloat(imgW)),
+                             y: min(max(ip.y, 0), CGFloat(imgH)))
+            // 两个角拖到一起 / 三点共线 → 单应无解 → shader 整屏早退，画面空白。
+            // 无解就拒绝这次移动，角停在上一帧有效位置。
+            var trial = corners
+            trial[i] = nc
+            guard Homography.solve(trial) != nil else { return }
+            corners = trial
             rebuild()
 
         case .decal(let uv0, let c0):
@@ -370,7 +387,7 @@ final class Editor: ObservableObject {
             center = CGPoint(x: min(max(Double(c0.x) + Double(uv1.x) - Double(uv0.x), -0.2), 1.2),
                              y: min(max(Double(c0.y) + Double(uv1.y) - Double(uv0.y), -0.2), 1.2))
             recomputeJ()
-            recomputeAnchor()
+            // 拖动中不更新锚点：基准跟着位置变，整张贴花会忽明忽暗。松手再算（见 touchEnd）
             invalidate()
         }
     }
@@ -378,6 +395,8 @@ final class Editor: ObservableObject {
     func touchEnd() {
         drag = nil
         touched = false
+        // 松手才定锚点，避免拖动时整张贴花亮度跳
+        if hasPhoto, hMat != nil { recomputeAnchor(); invalidate() }
     }
 
     private func pointInPoly(_ p: CGPoint, _ poly: [CGPoint]) -> Bool {
@@ -509,14 +528,21 @@ final class Editor: ObservableObject {
     func saveToAlbum() {
         guard !busy else { return }
         busy = true
-        let t0 = CACurrentMediaTime()
-        guard let img = exportImage() else {
+        // 4096 离屏渲染 + 67MB getBytes + 组图，主线程做会冻住界面
+        DispatchQueue.global(qos: .userInitiated).async {
+            let t0 = CACurrentMediaTime()
+            let img = self.exportImage()
+            let ms = Int((CACurrentMediaTime() - t0) * 1000)
+            DispatchQueue.main.async { self.finishSave(img, ms: ms) }
+        }
+    }
+
+    private func finishSave(_ img: UIImage?, ms: Int) {
+        guard let img else {
             busy = false
             toast = "导出失败"
             return
         }
-        let ms = Int((CACurrentMediaTime() - t0) * 1000)
-
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] st in
             guard st == .authorized || st == .limited else {
                 DispatchQueue.main.async {

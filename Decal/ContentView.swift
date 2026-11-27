@@ -18,6 +18,7 @@ struct ContentView: View {
     @StateObject private var ed = Editor()
     @State private var photoItem: PhotosPickerItem?
     @State private var decalItem: PhotosPickerItem?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +31,8 @@ struct ContentView: View {
         .onChange(of: photoItem) { _, item in load(item, isPhoto: true) }
         .onChange(of: decalItem) { _, item in load(item, isPhoto: false) }
         .onChange(of: ed.toast) { _, t in autoHide(t) }
+        // 手势被来电/切后台打断时不会走 onEnded，touched 会永久卡住 → 之后再也拖不动
+        .onChange(of: scenePhase) { _, p in if p != .active { ed.touchEnd() } }
     }
 
     // ---------------------------------------------------------------- 画布
@@ -49,8 +52,9 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉
-            .gesture(dragGesture, including: ed.hasPhoto ? .all : .none)
+            // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉；
+            // busy（解码/导出）时也关掉，导出读的是同一份状态，别让拖动改到一半
+            .gesture(dragGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
             .onAppear { ed.setStage(geo.size) }
             .onChange(of: geo.size) { _, s in ed.setStage(s) }
         }
@@ -121,7 +125,8 @@ struct ContentView: View {
     private var controlBar: some View {
         VStack(spacing: 7) {
             HStack(spacing: 10) {
-                slider("大小", value: pbind(\.hu), range: 0.06...0.90) { "\(Int($0 * 100))" }
+                // 上限 0.46 = decalHalf() 里防出平面的 clamp，再往上拖画面不会有变化
+                slider("大小", value: pbind(\.hu), range: 0.06...0.46) { "\(Int($0 * 100))" }
                 slider("旋转", value: pbind(\.rot), range: -60...60) { "\(Int($0))°" }
             }
             HStack(spacing: 10) {
@@ -159,6 +164,7 @@ struct ContentView: View {
         .padding(.top, 8)
         .padding(.bottom, 8)
         .background(cPanel)
+        .disabled(ed.busy)      // 解码/导出中别改参数，后台读的是同一份状态
     }
 
     private func slider(_ title: String, value: Binding<Double>,
