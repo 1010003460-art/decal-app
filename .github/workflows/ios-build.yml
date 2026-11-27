@@ -32,6 +32,21 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # 在模拟器里真点一次「拍一张」：模拟器没有相机 → 应弹出「这台设备没有可用相机」。
+      # 这句话出现就证明点击到达了按钮；没出现说明又被画布手势吞了（真机报过的问题，
+      # 编译和静态检查都发现不了，只有真的点一次才知道）
+      - name: UI smoke test (simulator)
+        run: |
+          DEV=$(xcrun simctl list devices available -j | python3 -c "import json,sys;d=json.load(sys.stdin)['devices'];n=[x['name'] for k,v in d.items() if 'iOS' in k for x in v if 'iPhone' in x['name']];print(n[0] if n else 'iPhone 16')")
+          echo "simulator = $DEV"
+          xcodebuild test \
+            -project Decal.xcodeproj \
+            -scheme Decal \
+            -destination "platform=iOS Simulator,name=$DEV" \
+            -derivedDataPath build-test \
+            -only-testing:DecalUITests \
+            CODE_SIGNING_ALLOWED=NO
+
       - name: Build (unsigned)
         run: |
           xcodebuild \
