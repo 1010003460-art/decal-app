@@ -165,7 +165,8 @@ final class Editor: ObservableObject {
     }
 
     func setDecal(_ data: Data) {
-        if let cg = Editor.decode(data, maxPixel: 2048) { setDecalCG(cg) }
+        guard let cg = Editor.decode(data, maxPixel: 2048) else { toast = "这张贴图读不出来"; return }
+        setDecalCG(cg)
         recomputeJ()
         invalidate()
     }
@@ -315,7 +316,8 @@ final class Editor: ObservableObject {
 
         let bx = min(lowW - 1, max(0, Int((Double(p.x) / imgW * Double(lowW - 1)).rounded())))
         let byTop = min(lowH - 1, max(0, Int((Double(p.y) / imgH * Double(lowH - 1)).rounded())))
-        let by = lowH - 1 - byTop     // CGContext 原点在左下，行要翻过来
+        let by = byTop     // CGBitmapContext 的 data row 0 就是图像顶部（与 canvas getImageData 同）；
+                           // 原点在左下只影响 draw 的 rect 解释，不影响存储行序 —— 不要再翻一次
 
         var sum = 0.0, n = 0.0
         for dy in -1...1 {
