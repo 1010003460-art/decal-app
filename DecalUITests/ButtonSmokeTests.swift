@@ -60,6 +60,25 @@ final class ButtonSmokeTests: XCTestCase {
         saveShot("probe-photo")
     }
 
+    /// 对照组：不开遮挡时贴花必须跨过照片中线。
+    /// 没有它的话，「橙色全在右半」也可能只是因为贴花本来就偏右，证明不了遮挡生效。
+    func testDecalCoversBothHalvesWithoutOcclusion() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-probe-photo", "-probe-decal"]
+        app.launch()
+
+        _ = app.buttons["保存"].waitForExistence(timeout: 20)
+        Thread.sleep(forTimeInterval: 3.0)
+        let shot = saveShot("no-occlusion")
+
+        guard let cg = shot.image.cgImage else { return XCTFail("截不出图") }
+        let (total, left) = Self.countOrange(cg)
+        XCTAssertGreaterThan(total, 800, "贴花没画出来")
+        let leftRatio = Double(left) / Double(total)
+        XCTAssertGreaterThan(leftRatio, 0.3,
+                             "不开遮挡时贴花应跨过中线（实际左半 \(Int(leftRatio * 100))%）—— 对照不成立")
+    }
+
     /// 遮挡剔除：合成 mask 左半全黑（挡住）、右半全白（可画）。
     /// 判据是贴花的橙色像素必须几乎全在画面右半边 —— 这是唯一能离线验证
     /// 「逐像素遮挡」的地方（真机的 Vision 分割在模拟器上跑不出来）。
@@ -81,8 +100,10 @@ final class ButtonSmokeTests: XCTestCase {
                           "左半边还有 \(left)/\(total) 个橙色像素（\(Int(leftRatio * 100))%）—— 遮挡没生效")
     }
 
-    /// 数「贴花橙」像素。贴花探针是 (1, 0.5, 0) 的橙，但表面融合会把它压暗或提亮，
-    /// 所以判据放宽成「暖色梯度」：r 明显大于 g，g 明显大于 b，且不是纯红背景。
+    /// 数「贴花橙」像素。贴花探针是 (1, 0.5, 0) 的橙。
+    /// 注意 g 的门槛必须抬高：探针照片里的红色经 JPEG 编码后是 (255,39,0)，
+    /// 用 g>25 会把整片红底算成橙色（第一版就是这么误判的，实测 77% 假阳性）。
+    /// 橙色 g≈132、红底 g≈39，用 g>90 分开；b<80 再挡掉白色条。
     private static func countOrange(_ cg: CGImage) -> (total: Int, left: Int) {
         let w = cg.width, h = cg.height
         var buf = [UInt8](repeating: 0, count: w * h * 4)
@@ -100,7 +121,7 @@ final class ButtonSmokeTests: XCTestCase {
                 for x in stride(from: 0, to: w, by: 2) {
                     let i = (y * w + x) * 4
                     let r = Int(p[i]), g = Int(p[i + 1]), b = Int(p[i + 2])
-                    guard r > 120, g > 25, b < 170, r > g + 30, g > b + 15 else { continue }
+                    guard r > 180, g > 90, b < 80, g > b + 60 else { continue }
                     total += 1
                     if x < w / 2 { left += 1 }
                 }
