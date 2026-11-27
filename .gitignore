@@ -19,3 +19,7 @@ dist/
 
 # 诊断出图
 diag/*.png
+
+# CI 产物下载目录
+dl/
+dist2/
