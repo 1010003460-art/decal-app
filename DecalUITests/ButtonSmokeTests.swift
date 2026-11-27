@@ -30,17 +30,20 @@ final class ButtonSmokeTests: XCTestCase {
                       "点击没有到达按钮 —— 被画布手势吞了（就是这次真机报的问题）")
     }
 
-    func testEmptyStatePhotoPickerButtonExists() {
+    func testEmptyStatePhotoPickerOpens() {
         let app = XCUIApplication()
         app.launch()
 
         // PhotosPicker 在无障碍树里不一定是 .button，按任意元素找
         let pick = app.descendants(matching: .any)["选择照片"]
         XCTAssertTrue(pick.waitForExistence(timeout: 20), "空态没有「选择照片」")
+        XCTAssertTrue(pick.isHittable, "「选择照片」在，但点不到（被上层盖住或命中区域不对）")
         pick.tap()
 
-        // 系统相册是独立进程的远程视图，断言不到内容；
-        // 但点击被吞掉时 App 会原地不动，这里只要不崩、仍在前台即视为到达
-        XCTAssertEqual(app.state, .runningForeground)
+        // 相册弹出来会盖住空态：按钮从「能点」变「不能点」，说明界面真的换了。
+        // 点击被吞掉的话它一直 hittable，这条就超时失败。
+        let covered = NSPredicate(format: "isHittable == false")
+        let e = expectation(for: covered, evaluatedWith: pick, handler: nil)
+        wait(for: [e], timeout: 10)
     }
 }
