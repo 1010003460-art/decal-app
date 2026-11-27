@@ -227,12 +227,45 @@ final class Editor: ObservableObject {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opt as CFDictionary)
     }
 
+    #if DEBUG
+    /// 只为 UI 测试截图用：生成一张「左红右蓝、顶部一条白」的探针图，走正常的 setPhoto 链路。
+    /// 截图里如果左半是蓝的，就是通道互换；如果白条跑到下面，就是行序翻了。
+    static func probePhotoData(w: Int = 600, h: Int = 400) -> Data? {
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = TextureIO.makeContext(width: w, height: h, space: cs,
+                                              info: TextureIO.nativeInfo()) else { return nil }
+        // CGContext 的 y 轴向上：y=0 是图像底部
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w / 2, height: h))
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: w / 2, y: 0, width: w / 2, height: h))
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: h - 40, width: w, height: 40))
+        guard let img = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: img).jpegData(compressionQuality: 0.95)
+    }
+
+    /// 贴花探针：不透明橙底 + 中间一个全透明的洞。
+    /// 橙底变半透明 = alpha 错；洞被填满 = alpha 丢了。截图上一眼能看出来。
+    static func probeDecalData(w: Int = 320, h: Int = 200) -> Data? {
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = TextureIO.makeContext(width: w, height: h, space: cs,
+                                              info: TextureIO.nativeInfo()) else { return nil }
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(red: 1, green: 0.5, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.clear(CGRect(x: w / 3, y: h / 3, width: w / 3, height: h / 3))
+        guard let img = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: img).pngData()   // PNG 才带 alpha
+    }
+    #endif
+
     /// 纹理统一走 TextureIO：显式按 RGBA8 画一遍再上传。
     /// 不用 MTKTextureLoader —— 它按 CGImage 的 bitmapInfo 自己猜格式，猜错时不报错，
     /// 只是照片整体发蓝、贴图发虚像透明的（真机上报过）。
     private func tex(_ cg: CGImage) -> MTLTexture? {
         guard let device else { return nil }
-        return TextureIO.rgba8(from: cg, device: device)
+        return TextureIO.bgra8(from: cg, device: device)
     }
 
     // ---------------------------------------------------------------- 布局

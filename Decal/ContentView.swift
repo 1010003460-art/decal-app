@@ -37,6 +37,18 @@ struct ContentView: View {
         .onChange(of: ed.toast) { _, t in autoHide(t) }
         // 手势被来电/切后台打断时不会走 onEnded，touched 会永久卡住 → 之后再也拖不动
         .onChange(of: scenePhase) { _, p in if p != .active { ed.touchEnd() } }
+        // UI 测试：-probe-photo 直接灌一张已知颜色的图，用来截屏核对通道与行序
+        .onAppear {
+            #if DEBUG
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("-probe-photo"), !ed.hasPhoto, let d = Editor.probePhotoData() {
+                ed.setPhoto(d)
+            }
+            if args.contains("-probe-decal"), let d = Editor.probeDecalData() {
+                ed.setDecal(d)
+            }
+            #endif
+        }
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker(isPresented: $showCamera) { data in ed.setPhoto(data) }
                 .ignoresSafeArea()

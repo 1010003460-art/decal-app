@@ -29,12 +29,6 @@ jobs:
       - name: JS reference check
         run: node verify_homography.mjs
 
-      # 纹理上传的通道顺序与行序（真机上报过照片发蓝、贴图发虚）
-      - name: Texture upload check
-        run: |
-          swiftc -O Decal/TextureIO.swift test/TextureCheck.swift -o /tmp/tcheck
-          /tmp/tcheck
-
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -45,13 +39,26 @@ jobs:
         run: |
           DEV=$(xcrun simctl list devices available -j | python3 -c "import json,sys;d=json.load(sys.stdin)['devices'];n=[x['name'] for k,v in d.items() if 'iOS' in k for x in v if 'iPhone' in x['name']];print(n[0] if n else 'iPhone 16')")
           echo "simulator = $DEV"
+          set +e
           xcodebuild test \
             -project Decal.xcodeproj \
             -scheme Decal \
             -destination "platform=iOS Simulator,name=$DEV" \
             -derivedDataPath build-test \
-            -only-testing:DecalUITests \
             CODE_SIGNING_ALLOWED=NO
+          RC=$?
+          mkdir -p shots
+          find ~/Library/Developer/CoreSimulator/Devices -name 'decal-shot-*.png' -exec cp {} shots/ \; 2>/dev/null
+          ls -la shots || true
+          exit $RC
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: simulator-screenshots
+          path: shots
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Build (unsigned)
         run: |

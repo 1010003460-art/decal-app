@@ -46,4 +46,32 @@ final class ButtonSmokeTests: XCTestCase {
         let e = expectation(for: covered, evaluatedWith: pick, handler: nil)
         wait(for: [e], timeout: 10)
     }
+
+    /// 截图存证：用 -probe-photo 灌一张「左红右蓝 + 顶部白条」的图，把画面传回 CI。
+    /// 通道互换会让左半变蓝，行序翻转会让白条跑到底部 —— 看图就能判断，不用再靠描述。
+    func testProbePhotoScreenshot() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-probe-photo", "-probe-decal"]
+        app.launch()
+
+        // 有照片才会出现控制栏；等不到也照样截图，正好能看到失败现场
+        _ = app.buttons["保存"].waitForExistence(timeout: 20)
+        Thread.sleep(forTimeInterval: 3.0)   // 给 Vision 自动找平面留时间
+        saveShot("probe-photo")
+    }
+
+    private func saveShot(_ name: String) {
+        let shot = XCUIScreen.main.screenshot()
+
+        // 一份进 xcresult（Xcode 里能看），一份写到沙盒 tmp（CI 里直接捞文件）
+        let att = XCTAttachment(screenshot: shot)
+        att.name = name
+        att.lifetime = .keepAlways
+        add(att)
+
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("decal-shot-\(name).png")
+        try? shot.pngRepresentation.write(to: url)
+        print("SHOT_PATH \(url.path)")
+    }
 }

@@ -43,6 +43,19 @@ targets:
         NSCameraUsageDescription: 现场拍一张照片，直接把贴花贴到墙面上。
         ITSAppUsesNonExemptEncryption: false
 
+  # 纹理格式与通道顺序：必须在 iOS 环境里跑，macOS 支持的超集不代表 iOS 支持
+  DecalTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - DecalTests
+    dependencies:
+      - target: Decal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wancai.decal.tests
+        GENERATE_INFOPLIST_FILE: YES
+
   # 只在模拟器里点按钮，证明点击能到达（编译发现不了这类问题）
   DecalUITests:
     type: bundle.ui-testing
@@ -62,12 +75,14 @@ schemes:
     build:
       targets:
         Decal: all
+        DecalTests: [test]
         DecalUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
+        - DecalTests
         - DecalUITests
     archive:
       config: Release
