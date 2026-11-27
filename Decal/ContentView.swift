@@ -37,6 +37,15 @@ struct ContentView: View {
         .onChange(of: ed.toast) { _, t in autoHide(t) }
         // 手势被来电/切后台打断时不会走 onEnded，touched 会永久卡住 → 之后再也拖不动
         .onChange(of: scenePhase) { _, p in if p != .active { ed.touchEnd() } }
+        // 遮挡探针必须等照片解码完再装：applyPhoto 会把 occlMask 覆盖成 Vision 的结果，
+        // 在 onAppear 里同步设会被后到的 applyPhoto 冲掉
+        .onChange(of: ed.hasPhoto) { _, has in
+            #if DEBUG
+            if has, ProcessInfo.processInfo.arguments.contains("-probe-occlusion") {
+                ed.setProbeOcclusion()
+            }
+            #endif
+        }
         // UI 测试：-probe-photo 直接灌一张已知颜色的图，用来截屏核对通道与行序
         .onAppear {
             #if DEBUG
@@ -188,12 +197,14 @@ struct ContentView: View {
                     Text("重置").chipBG()
                 }
                 .buttonStyle(.plain)
-                Button { ed.setMode(.corner) } label: {
-                    Text("四点").chipBG(ed.mode == .corner)
+                Button { ed.setMode(ed.mode == .decal ? .corner : .decal) } label: {
+                    // 原来是「四点」「贴花」两个 chip。角点已经不分模式都能拖，
+                    // 这个模式实际只决定贴花能不能拖，所以合成一个开关，位置让给「遮挡」
+                    Text("贴花").chipBG(ed.mode == .decal)
                 }
                 .buttonStyle(.plain)
-                Button { ed.setMode(.decal) } label: {
-                    Text("贴花").chipBG(ed.mode == .decal)
+                Button { ed.toggleOcclusion() } label: {
+                    Text("遮挡").chipBG(ed.occlEnabled)
                 }
                 .buttonStyle(.plain)
                 Button { ed.saveToAlbum() } label: {

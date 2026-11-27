@@ -38,6 +38,9 @@ fragment float4 fs_main(VOut in [[stage_in]],
                         constant Uniforms &u [[buffer(0)]],
                         texture2d<float> photo [[texture(0)]],
                         texture2d<float> dtex  [[texture(1)]],
+                        // 遮挡 mask（前景物体分割）。走独立纹理而不是 uniform 字段：
+                        // Uniforms 是 112 字节的硬约束，加字段要两侧同时改、漏一个整屏错位。
+                        texture2d<float> ocl   [[texture(2)]],
                         sampler smp [[sampler(0)]]) {
     const float3 BG   = float3(0.043, 0.047, 0.055);
     const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
@@ -64,6 +67,12 @@ fragment float4 fs_main(VOut in [[stage_in]],
     float2 fa = max(float2(FW(uv.x), FW(uv.y)), float2(1e-5));
     float planeFade = smoothstep(0.0, fa.x, qd.x) * smoothstep(0.0, fa.y, qd.y);
 
+    // ---- 遮挡：前景物体挡在平面之前时，贴花不该画上去。
+    // 没开遮挡时绑的是 1×1 全白纹理，采样恒为 1，这一乘等于不做事 ——
+    // 所以开关状态完全由绑哪张纹理决定，shader 里不需要分支，也不需要 uniform 字段。
+    float occ = smoothstep(0.35, 0.65, ocl.sample(smp, t).r);
+    planeFade *= occ;
+
     // ---- 贴花局部坐标（-1..1 为贴花框）----
     float2 d = uv - u.center;
     float c = cos(u.rot), s = sin(u.rot);
@@ -78,7 +87,7 @@ fragment float4 fs_main(VOut in [[stage_in]],
     float wN = u.contactPx * aa;
     float dd = m - 1.0;
     float ring = (1.0 - smoothstep(0.0, max(wN, 1e-6), dd)) * smoothstep(-aa * 2.0, aa, dd);
-    base *= 1.0 - u.contact * ring;
+    base *= 1.0 - u.contact * ring * occ;   // 被前景挡住的地方不该有接触阴影
 
     // ---- 贴花 + 表面融合 ----
     float4 dt = dtex.sample(smp, clamp(n * 0.5 + 0.5, 0.0, 1.0));

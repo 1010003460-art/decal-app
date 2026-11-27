@@ -60,7 +60,57 @@ final class ButtonSmokeTests: XCTestCase {
         saveShot("probe-photo")
     }
 
-    private func saveShot(_ name: String) {
+    /// 遮挡剔除：合成 mask 左半全黑（挡住）、右半全白（可画）。
+    /// 判据是贴花的橙色像素必须几乎全在画面右半边 —— 这是唯一能离线验证
+    /// 「逐像素遮挡」的地方（真机的 Vision 分割在模拟器上跑不出来）。
+    func testOcclusionCutsDecalInHalf() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-probe-photo", "-probe-decal", "-probe-occlusion"]
+        app.launch()
+
+        _ = app.buttons["保存"].waitForExistence(timeout: 20)
+        Thread.sleep(forTimeInterval: 3.0)
+        let shot = saveShot("occlusion")
+
+        guard let cg = shot.image.cgImage else { return XCTFail("截不出图") }
+        let (total, left) = Self.countOrange(cg)
+
+        XCTAssertGreaterThan(total, 400, "贴花的橙色一个都没找到 —— 贴花根本没画出来，先查这个")
+        let leftRatio = Double(left) / Double(total)
+        XCTAssertLessThan(leftRatio, 0.08,
+                          "左半边还有 \(left)/\(total) 个橙色像素（\(Int(leftRatio * 100))%）—— 遮挡没生效")
+    }
+
+    /// 数「贴花橙」像素。贴花探针是 (1, 0.5, 0) 的橙，但表面融合会把它压暗或提亮，
+    /// 所以判据放宽成「暖色梯度」：r 明显大于 g，g 明显大于 b，且不是纯红背景。
+    private static func countOrange(_ cg: CGImage) -> (total: Int, left: Int) {
+        let w = cg.width, h = cg.height
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return (0, 0)
+        }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        var total = 0, left = 0
+        buf.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: UInt8.self)
+            for y in stride(from: 0, to: h, by: 2) {
+                for x in stride(from: 0, to: w, by: 2) {
+                    let i = (y * w + x) * 4
+                    let r = Int(p[i]), g = Int(p[i + 1]), b = Int(p[i + 2])
+                    guard r > 120, g > 25, b < 170, r > g + 30, g > b + 15 else { continue }
+                    total += 1
+                    if x < w / 2 { left += 1 }
+                }
+            }
+        }
+        return (total, left)
+    }
+
+    @discardableResult
+    private func saveShot(_ name: String) -> XCUIScreenshot {
         let shot = XCUIScreen.main.screenshot()
 
         // 一份进 xcresult（Xcode 里能看），一份写到沙盒 tmp（CI 里直接捞文件）
@@ -73,5 +123,6 @@ final class ButtonSmokeTests: XCTestCase {
             .appendingPathComponent("decal-shot-\(name).png")
         try? shot.pngRepresentation.write(to: url)
         print("SHOT_PATH \(url.path)")
+        return shot
     }
 }

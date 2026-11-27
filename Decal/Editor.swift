@@ -1,3 +1,4 @@
+import CoreVideo
 import ImageIO
 import Metal
 import MetalKit
@@ -68,6 +69,17 @@ final class Editor: ObservableObject {
     private var decalTex: MTLTexture?
     private(set) var initError: String?
 
+    // ---- 遮挡剔除 ----
+    /// 用户开关。默认关：系统分割可能把「墙上那张海报」本身判成前景，
+    /// 那样贴花会被自己挡掉，这个功能必须能一键退回。
+    @Published var occlEnabled = false
+    /// 1×1 全白：没开遮挡 / 分割失败时绑它，shader 采样恒为 1
+    private var occlOnes: MTLTexture?
+    /// 前景分割结果（照片尺寸，r8Unorm）。nil = 分割没跑出来
+    private var occlMask: MTLTexture?
+    /// 实际绑给 texture(2) 的那张
+    private var occlTex: MTLTexture? { occlEnabled ? (occlMask ?? occlOnes) : occlOnes }
+
     // ---- 几何 ----
     private(set) var imgW: Double = 0
     private(set) var imgH: Double = 0
@@ -135,6 +147,10 @@ final class Editor: ObservableObject {
         sd.tAddressMode = .clampToEdge
         sampler = dev.makeSamplerState(descriptor: sd)
 
+        // 1×1 全白：shader 里 texture(2) 永远有东西可采，开关只换绑哪张图
+        occlOnes = TextureIO.solid(255, device: dev)
+        if occlOnes == nil { initError = "遮挡用的默认纹理创建失败" }
+
         if let def = Editor.makeDefaultDecal() { setDecalCG(def) }
     }
 
@@ -147,20 +163,46 @@ final class Editor: ObservableObject {
         guard !busy else { toast = "上一张还在处理，稍等"; return }
         busy = true
         // 48MP HEIC 的 ImageIO 解码能到 500ms，放主线程 = 点完选图界面僵住没反馈
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             let cg = Editor.decode(data, maxPixel: 4096)
             // 顺手让 Vision 找画面里最明显的矩形：找到就直接把四角摆上去
             let quad = cg.flatMap { Editor.detectQuad($0) }
-            DispatchQueue.main.async { self.applyPhoto(cg, quad) }
+            // 遮挡分割跟解码共用同一张图，不额外解码一遍
+            let mask = cg.flatMap { self.makeOcclusionMask($0) }
+            DispatchQueue.main.async { self.applyPhoto(cg, quad, mask) }
         }
     }
 
-    private func applyPhoto(_ cg: CGImage?, _ quad: [CGPoint]?) {
+    /// 前景实例分割 → r8 遮挡 mask（照片像素尺寸）。
+    /// 模拟器、老设备、系统限制等情况下 Vision 会失败，返回 nil 即可 —— 上层退化成「无遮挡」。
+    private func makeOcclusionMask(_ cg: CGImage) -> MTLTexture? {
+        guard let device else { return nil }
+        let req = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        do { try handler.perform([req]) } catch { return nil }
+        guard let obs = req.results?.first, !obs.allInstances.isEmpty else { return nil }
+        // 这张 mask 是「照片像素尺寸」，跟 shader 里按照片 uv 采样的 t 天然对齐
+        guard let buf = try? obs.generateScaledMaskForImage(forInstances: obs.allInstances,
+                                                            from: handler) else { return nil }
+
+        CVPixelBufferLockBaseAddress(buf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buf, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buf) else { return nil }
+        return TextureIO.r8(bytes: UnsafeRawPointer(base),
+                            width: CVPixelBufferGetWidth(buf),
+                            height: CVPixelBufferGetHeight(buf),
+                            bytesPerRow: CVPixelBufferGetBytesPerRow(buf),
+                            device: device)
+    }
+
+    private func applyPhoto(_ cg: CGImage?, _ quad: [CGPoint]?, _ mask: MTLTexture?) {
         defer { busy = false }
         guard let cg else { toast = "这张图片读不出来"; return }
         imgW = Double(cg.width)
         imgH = Double(cg.height)
         photoTex = tex(cg)
+        occlMask = mask
         buildLowLum(cg)
 
         corners = quad ?? defaultCorners()
@@ -179,6 +221,8 @@ final class Editor: ObservableObject {
             mode = .corner
             hint = "四个角在画面边缘，先拖到你要贴的那个平面上"
         }
+        // 开着遮挡换图但分割没结果 → 明确说一声，否则「开了没效果」看起来像 bug
+        if occlEnabled && mask == nil { toast = "这张照片没分出前景，遮挡暂时不生效" }
     }
 
     private func defaultCorners() -> [CGPoint] {
@@ -265,6 +309,23 @@ final class Editor: ObservableObject {
         ctx.clear(CGRect(x: w / 3, y: h / 3, width: w / 3, height: h / 3))
         guard let img = ctx.makeImage() else { return nil }
         return UIImage(cgImage: img).pngData()   // PNG 才带 alpha
+    }
+
+    /// 合成遮挡 mask 供 CI 截图断言：左半全黑（挡住）、右半全白（可画）。
+    /// 真机的 mask 来自 Vision，模拟器上不一定跑得出来 —— 所以用确定的数据单独验 shader 那段逻辑。
+    func setProbeOcclusion() {
+        guard let device else { return }
+        let w = 64, h = 64
+        var bytes = [UInt8](repeating: 255, count: w * h)
+        for y in 0..<h {
+            for x in 0..<(w / 2) { bytes[y * w + x] = 0 }
+        }
+        occlMask = bytes.withUnsafeBytes { raw in
+            TextureIO.r8(bytes: raw.baseAddress!, width: w, height: h,
+                         bytesPerRow: w, device: device)
+        }
+        occlEnabled = true
+        invalidate()
     }
     #endif
 
@@ -435,10 +496,22 @@ final class Editor: ObservableObject {
 
     func setMode(_ m: Tool) {
         mode = m
-        // 两个模式都能拖角点；「贴花」模式额外允许拖动贴花本身
-        hint = m == .corner
-            ? "拖四个蓝点把平面框住 · 拖贴花请切到「贴花」"
-            : "拖贴花挪位置 · 角点也能直接拖"
+        // 角点任何时候都能拖（见 touchStart），这个模式实际只决定「贴花能不能拖」
+        hint = m == .decal
+            ? "拖贴花挪位置 · 四个角点也随时能拖"
+            : "拖四个角点框住平面 · 点「贴花」才能拖贴花"
+        invalidate()
+    }
+
+    /// 遮挡开关。没有分割结果时直接说清楚，否则「开了但没变化」看起来像坏了
+    func toggleOcclusion() {
+        guard hasPhoto else { return }
+        guard occlMask != nil else {
+            toast = "这张照片没分出前景，遮挡用不了"
+            return
+        }
+        occlEnabled.toggle()
+        if occlEnabled { toast = "遮挡已开 · 被前景挡住的部分不画" }
         invalidate()
     }
 
@@ -560,7 +633,7 @@ final class Editor: ObservableObject {
               let cb = queue.makeCommandBuffer(),
               let enc = cb.makeRenderCommandEncoder(descriptor: rpd) else { return }
 
-        if let photoTex, let hInv, imgW > 0 {
+        if let photoTex, let hInv, let occl = occlTex, imgW > 0 {
             let cs = view.contentScaleFactor
             let (hu2, hv2) = decalHalf()
             var u = Uniforms(
@@ -581,6 +654,7 @@ final class Editor: ObservableObject {
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
             enc.setFragmentTexture(photoTex, index: 0)
             enc.setFragmentTexture(decalTex, index: 1)
+            enc.setFragmentTexture(occl, index: 2)
             if let s = sampler { enc.setFragmentSamplerState(s, index: 0) }
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
@@ -593,7 +667,7 @@ final class Editor: ObservableObject {
     // ---------------------------------------------------------------- 导出
 
     func exportImage() -> UIImage? {
-        guard let photoTex, let hInv, imgW > 0,
+        guard let photoTex, let hInv, let occl = occlTex, imgW > 0,
               let device, let queue, let pipeline else { return nil }
 
         var w = Int(imgW), h = Int(imgH)
@@ -638,6 +712,7 @@ final class Editor: ObservableObject {
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         enc.setFragmentTexture(photoTex, index: 0)
         enc.setFragmentTexture(decalTex, index: 1)
+        enc.setFragmentTexture(occl, index: 2)
         if let s = sampler { enc.setFragmentSamplerState(s, index: 0) }
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()

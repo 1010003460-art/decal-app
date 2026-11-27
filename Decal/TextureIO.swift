@@ -40,6 +40,28 @@ enum TextureIO {
         return t
     }
 
+    /// 单通道 8bit 纹理（遮挡 mask）。直接从 CVPixelBuffer 的字节上传，不经过 CGImage 重绘。
+    /// 用 r8 而不是 bgra8：4096² 的 mask 按 RGBA 要 67MB，单通道只要 16.7MB。
+    static func r8(bytes: UnsafeRawPointer, width: Int, height: Int,
+                   bytesPerRow: Int, device: MTLDevice) -> MTLTexture? {
+        guard width > 0, height > 0, bytesPerRow >= width else { return nil }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm,
+                                                         width: width, height: height,
+                                                         mipmapped: false)
+        d.usage = .shaderRead
+        guard let t = device.makeTexture(descriptor: d) else { return nil }
+        t.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                  withBytes: bytes, bytesPerRow: bytesPerRow)
+        return t
+    }
+
+    /// 1×1 常量纹理。「没开遮挡」时绑一张全白，shader 采样恒为 1 —— 这样开关不需要
+    /// uniform 字段，也不需要 shader 分支。
+    static func solid(_ v: UInt8, device: MTLDevice) -> MTLTexture? {
+        var b = v
+        return r8(bytes: &b, width: 1, height: 1, bytesPerRow: 1, device: device)
+    }
+
     /// 自己分配内存的 CGBitmapContext（data: nil 交给 CoreGraphics 管）
     static func makeContext(width: Int, height: Int,
                             space: CGColorSpace, info: UInt32) -> CGContext? {
