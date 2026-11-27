@@ -64,7 +64,6 @@ final class Editor: ObservableObject {
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
     private var sampler: MTLSamplerState?
-    private var loader: MTKTextureLoader?
     private var photoTex: MTLTexture?
     private var decalTex: MTLTexture?
     private(set) var initError: String?
@@ -108,7 +107,6 @@ final class Editor: ObservableObject {
         }
         device = dev
         queue = dev.makeCommandQueue()
-        loader = MTKTextureLoader(device: dev)
 
         guard let lib = dev.makeDefaultLibrary(),
               let vfn = lib.makeFunction(name: "vs_main"),
@@ -229,11 +227,12 @@ final class Editor: ObservableObject {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opt as CFDictionary)
     }
 
+    /// 纹理统一走 TextureIO：显式按 RGBA8 画一遍再上传。
+    /// 不用 MTKTextureLoader —— 它按 CGImage 的 bitmapInfo 自己猜格式，猜错时不报错，
+    /// 只是照片整体发蓝、贴图发虚像透明的（真机上报过）。
     private func tex(_ cg: CGImage) -> MTLTexture? {
-        guard let loader else { return nil }
-        // SRGB:false → 保持 8bit 数值，跟 WebGL 版颜色一致
-        let opt: [MTKTextureLoader.Option: Any] = [.SRGB: NSNumber(value: false)]
-        return try? loader.newTexture(cgImage: cg, options: opt)
+        guard let device else { return nil }
+        return TextureIO.rgba8(from: cg, device: device)
     }
 
     // ---------------------------------------------------------------- 布局

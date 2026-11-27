@@ -29,6 +29,12 @@ jobs:
       - name: JS reference check
         run: node verify_homography.mjs
 
+      # 纹理上传的通道顺序与行序（真机上报过照片发蓝、贴图发虚）
+      - name: Texture upload check
+        run: |
+          swiftc -O Decal/TextureIO.swift test/TextureCheck.swift -o /tmp/tcheck
+          /tmp/tcheck
+
       - name: Generate Xcode project
         run: xcodegen generate
 
