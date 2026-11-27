@@ -19,6 +19,16 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # 编译并运行真正打进 App 的那份 Swift 单应实现（不启模拟器，五秒）
+      - name: Swift math check
+        run: |
+          swiftc -O Decal/Homography.swift test/HomographyCheck.swift -o /tmp/hcheck
+          /tmp/hcheck
+
+      # JS 参考实现的同组用例，两边口径必须一致
+      - name: JS reference check
+        run: node verify_homography.mjs
+
       - name: Generate Xcode project
         run: xcodegen generate
 

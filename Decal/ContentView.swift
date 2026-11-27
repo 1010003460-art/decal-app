@@ -36,7 +36,7 @@ struct ContentView: View {
         // 手势被来电/切后台打断时不会走 onEnded，touched 会永久卡住 → 之后再也拖不动
         .onChange(of: scenePhase) { _, p in if p != .active { ed.touchEnd() } }
         .fullScreenCover(isPresented: $showCamera) {
-            CameraPicker { data in ed.setPhoto(data) }
+            CameraPicker(isPresented: $showCamera) { data in ed.setPhoto(data) }
                 .ignoresSafeArea()
         }
     }
@@ -61,8 +61,9 @@ struct ContentView: View {
             // including: .none —— 没照片时这层手势会把空态里的「选择照片」按钮吃掉；
             // busy（解码/导出）时也关掉，导出读的是同一份状态，别让拖动改到一半
             .gesture(dragGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
-            // 捏合与单指拖同时挂着：SwiftUI 里并存的两个手势只有 simultaneousGesture 能都收到
-            .simultaneousGesture(magnifyGesture)
+            // 捏合与单指拖同时挂着：SwiftUI 里并存的两个手势只有 simultaneousGesture 能都收到。
+            // including 与上面一致 —— 空态时这层手势会跟「选择照片」「拍一张」抢点击
+            .simultaneousGesture(magnifyGesture, including: (ed.hasPhoto && !ed.busy) ? .all : .none)
             .onAppear { ed.setStage(geo.size) }
             .onChange(of: geo.size) { _, s in ed.setStage(s) }
         }
@@ -180,8 +181,7 @@ struct ContentView: View {
                     Text(ed.busy ? "…" : "保存")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(Color(red: 0.016, green: 0.133, blue: 0.165))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .background(cAccent).clipShape(RoundedRectangle(cornerRadius: 9))
                 }
                 .disabled(ed.busy)
@@ -293,8 +293,8 @@ private struct Handles: View {
 /// 只为拍一张照片：系统相机、单张、拍完把 JPEG 数据交给 setPhoto。
 /// 复用现有的解码链路，EXIF 烘焙和 Vision 自动找平面都不用重写。
 private struct CameraPicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
     let onData: (Data) -> Void
-    @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let p = UIImagePickerController()
@@ -306,20 +306,22 @@ private struct CameraPicker: UIViewControllerRepresentable {
 
     func updateUIViewController(_ p: UIImagePickerController, context: Context) {}
 
-    func makeCoordinator() -> Coord { Coord(onData: onData, close: { dismiss() }) }
+    func makeCoordinator() -> Coord { Coord(isPresented: $isPresented, onData: onData) }
 
     final class Coord: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        // 用 Binding 而不是 @Environment(\.dismiss)：representable 里的 dismiss 拿到的
+        // presentation 上下文取决于展示方式，Binding 是确定的
+        private let isPresented: Binding<Bool>
         private let onData: (Data) -> Void
-        private let close: () -> Void
 
-        init(onData: @escaping (Data) -> Void, close: @escaping () -> Void) {
+        init(isPresented: Binding<Bool>, onData: @escaping (Data) -> Void) {
+            self.isPresented = isPresented
             self.onData = onData
-            self.close = close
         }
 
         func imagePickerController(_ picker: UIImagePickerController,
                                    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            close()
+            isPresented.wrappedValue = false
             guard let img = info[.originalImage] as? UIImage else { return }
             // 12MP 的 JPEG 编码在主线程要 100ms 上下，关掉相机的瞬间会顿一下
             DispatchQueue.global(qos: .userInitiated).async {
@@ -328,7 +330,9 @@ private struct CameraPicker: UIViewControllerRepresentable {
             }
         }
 
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { close() }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            isPresented.wrappedValue = false
+        }
     }
 }
 
@@ -348,8 +352,8 @@ private extension View {
         self
             .font(.system(size: 13))
             .foregroundStyle(on ? Color(red: 0.561, green: 0.890, blue: 0.949) : Color.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
+            // 7 个 chip 挤一行，高度只有 34pt 时手指不好点；对齐 HIG 的 44pt 最小触摸区
+            .frame(maxWidth: .infinity, minHeight: 44)
             .background(on ? Color(red: 0.169, green: 0.231, blue: 0.271) : cChip)
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9)
