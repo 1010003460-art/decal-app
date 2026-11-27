@@ -16,12 +16,10 @@ targets:
     type: application
     platform: iOS
     sources:
-      # decal.html 单独作为资源入包（放在 Bundle 根，Swift 用 forResource 取）
+      # decal.html 是 Web 参考实现，不进包（原生版已不需要 WKWebView）
       - path: Decal
         excludes:
           - "decal.html"
-      - path: Decal/decal.html
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wancai.decal

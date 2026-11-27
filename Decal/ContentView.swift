@@ -1,112 +1,261 @@
-import Photos
+import PhotosUI
 import SwiftUI
-import UIKit
-import WebKit
 
 // ============================================================================
-// 贴花 App 的 iOS 外壳
-//
-// 渲染全部在 decal.html 里（WebGL2 一片全屏着色器，四点单应逆采样）。
-// 这里只做两件事：把本地页面装进 WKWebView，以及把导出的图片写进相册。
-//
-// 为什么不是原生 Metal：
-//   · 平面贴花是纯 2D 单应问题，数学上精确，没有 3D 需要写
-//   · 同一份 shader 以后直接跑安卓，不用重写第二套
-//   · 页面能在本机用真实照片逐像素验证（已与 numpy 独立实现比对到 0.49/255）
-// 代价：上架时会碰到 App Store 4.2（最低功能）审核风险，自用不受影响。
+// 界面层：画布（Metal）+ 手柄（Canvas 叠加）+ 底部面板（SwiftUI 原生控件）
+// 所有状态都在 Editor 里，这里只负责摆放和转发手势。
 // ============================================================================
+
+private let cBg      = Color(red: 0.067, green: 0.075, blue: 0.086)
+private let cPanel   = Color(red: 0.106, green: 0.118, blue: 0.137)
+private let cChip    = Color(red: 0.145, green: 0.165, blue: 0.192)
+private let cLine    = Color(red: 0.173, green: 0.192, blue: 0.220)
+private let cDim     = Color(red: 0.545, green: 0.576, blue: 0.620)
+private let cAccent  = Color(red: 0.184, green: 0.714, blue: 0.784)
+private let cAccent2 = Color(red: 0.478, green: 0.910, blue: 0.980)
 
 struct ContentView: View {
+    @StateObject private var ed = Editor()
+    @State private var photoItem: PhotosPickerItem?
+    @State private var decalItem: PhotosPickerItem?
+
     var body: some View {
-        WebShell()
-            .ignoresSafeArea(edges: .bottom)
-            .background(Color(red: 0.067, green: 0.075, blue: 0.086))
-    }
-}
-
-struct WebShell: UIViewRepresentable {
-    func makeCoordinator() -> Bridge { Bridge() }
-
-    func makeUIView(context: Context) -> WKWebView {
-        let conf = WKWebViewConfiguration()
-        conf.allowsInlineMediaPlayback = true
-        conf.userContentController.add(context.coordinator, name: "save")
-
-        let wv = WKWebView(frame: .zero, configuration: conf)
-        wv.isOpaque = false
-        wv.backgroundColor = UIColor(red: 0.067, green: 0.075, blue: 0.086, alpha: 1)
-        wv.scrollView.bounces = false
-        wv.scrollView.isScrollEnabled = false
-        wv.scrollView.contentInsetAdjustmentBehavior = .never
-        wv.allowsBackForwardNavigationGestures = false
-
-        if let url = Bundle.main.url(forResource: "decal", withExtension: "html") {
-            wv.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        } else {
-            let html = """
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <div style="font:16px -apple-system;color:#eee;padding:40px;line-height:1.7">
-              没找到 decal.html<br><span style="color:#888">检查 Xcode 里这个文件是否在 Copy Bundle Resources 中</span>
-            </div>
-            """
-            wv.loadHTMLString(html, baseURL: nil)
+        VStack(spacing: 0) {
+            stage
+            if ed.hasPhoto { controlBar }
         }
-        return wv
+        .background(cBg)
+        .preferredColorScheme(.dark)
+        .overlay(alignment: .bottom) { toastView }
+        .onChange(of: photoItem) { _, item in load(item, isPhoto: true) }
+        .onChange(of: decalItem) { _, item in load(item, isPhoto: false) }
+        .onChange(of: ed.toast) { _, t in autoHide(t) }
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-}
+    // ---------------------------------------------------------------- 画布
 
-// MARK: - JS → 原生：存相册
-
-final class Bridge: NSObject, WKScriptMessageHandler {
-    func userContentController(_ controller: WKUserContentController,
-                              didReceive message: WKScriptMessage) {
-        guard message.name == "save",
-              let body = message.body as? [String: Any],
-              let dataURL = body["dataURL"] as? String,
-              let comma = dataURL.firstIndex(of: ",") else { return }
-
-        let b64 = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
-              let image = UIImage(data: data) else {
-            reply(message.webView, "图片解码失败")
-            return
-        }
-
-        let ms = (body["ms"] as? Int).map { " · \($0)ms" } ?? ""
-
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else {
-                self.reply(message.webView, "没有相册写入权限，去「设置 → 贴花」里打开")
-                return
+    private var stage: some View {
+        GeometryReader { geo in
+            ZStack {
+                MetalView(ed: ed)
+                Handles(ed: ed).allowsHitTesting(false)
+                if !ed.hasPhoto { emptyState }
+                if let err = ed.initError {
+                    Text(err).font(.system(size: 13))
+                        .foregroundStyle(.white).padding(24)
+                        .multilineTextAlignment(.center)
+                }
+                hintView
             }
-            PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAsset(from: image)
-            } completionHandler: { ok, err in
-                if ok {
-                    self.reply(message.webView, "已存入相册" + ms)
-                } else {
-                    self.reply(message.webView, err?.localizedDescription ?? "保存失败")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { v in
+                        if ed.isTouching { ed.touchMove(v.location) }
+                        else { ed.touchStart(v.location) }
+                    }
+                    .onEnded { _ in ed.touchEnd() }
+            )
+            .onAppear { ed.setStage(geo.size) }
+            .onChange(of: geo.size) { _, s in ed.setStage(s) }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Text("▣").font(.system(size: 38)).opacity(0.85)
+            Text("选一张有平面的照片").font(.system(size: 17, weight: .semibold))
+            Text("墙、海报、包装、纸箱、屏幕都行。\n把四个角拖到那个平面的四个角上，再贴。")
+                .font(.system(size: 13)).foregroundStyle(cDim)
+                .multilineTextAlignment(.center).lineSpacing(4)
+            PhotosPicker(selection: $photoItem, matching: .images) {
+                Text("选择照片").font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.016, green: 0.133, blue: 0.165))
+                    .padding(.horizontal, 30).padding(.vertical, 12)
+                    .background(cAccent).clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .padding(.top, 4)
+        }
+        .foregroundStyle(.white)
+        .padding(26)
+    }
+
+    private var hintView: some View {
+        VStack {
+            if ed.hasPhoto && !ed.hint.isEmpty {
+                Text(ed.hint)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color(red: 0.89, green: 0.91, blue: 0.93))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 18)
+                    .shadow(color: .black.opacity(0.9), radius: 4, y: 1)
+                    .padding(.top, 10)
+            }
+            Spacer()
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var toastView: some View {
+        Group {
+            if !ed.toast.isEmpty {
+                Text(ed.toast)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16).padding(.vertical, 9)
+                    .background(Color(red: 0.078, green: 0.094, blue: 0.110).opacity(0.95))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(cLine))
+                    .padding(.bottom, ed.hasPhoto ? 132 : 40)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: ed.toast)
+    }
+
+    // ---------------------------------------------------------------- 面板
+
+    private var controlBar: some View {
+        VStack(spacing: 7) {
+            HStack(spacing: 10) {
+                slider("大小", value: pbind(\.hu), range: 0.06...0.90) { "\(Int($0 * 100))" }
+                slider("旋转", value: pbind(\.rot), range: -60...60) { "\(Int($0))°" }
+            }
+            HStack(spacing: 10) {
+                slider("表面融合", value: pbind(\.shade), range: 0...1) { "\(Int($0 * 100))%" }
+                slider("接触阴影", value: pbind(\.contact), range: 0...1) { "\(Int($0 * 100))%" }
+            }
+            HStack(spacing: 8) {
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Text("照片").chipBG()
+                }
+                PhotosPicker(selection: $decalItem, matching: .images) {
+                    Text("贴图").chipBG()
+                }
+                Button { ed.setMode(.corner) } label: {
+                    Text("四点").chipBG(ed.mode == .corner)
+                }
+                .buttonStyle(.plain)
+                Button { ed.setMode(.decal) } label: {
+                    Text("贴花").chipBG(ed.mode == .decal)
+                }
+                .buttonStyle(.plain)
+                Button { ed.saveToAlbum() } label: {
+                    Text(ed.busy ? "…" : "保存")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color(red: 0.016, green: 0.133, blue: 0.165))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(cAccent).clipShape(RoundedRectangle(cornerRadius: 9))
+                }
+                .disabled(ed.busy)
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .background(cPanel)
+    }
+
+    private func slider(_ title: String, value: Binding<Double>,
+                        range: ClosedRange<Double>,
+                        fmt: @escaping (Double) -> String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Text(title).foregroundStyle(cDim)
+                Spacer(minLength: 0)
+                Text(fmt(value.wrappedValue)).foregroundStyle(.white)
+            }
+            .font(.system(size: 11))
+            Slider(value: value, in: range)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// 参数改动后重绘（几何只在拖中心时变，滑块只影响 uniform）
+    private func pbind(_ path: ReferenceWritableKeyPath<Editor, Double>) -> Binding<Double> {
+        Binding(get: { ed[keyPath: path] },
+                set: { ed[keyPath: path] = $0; ed.invalidate() })
+    }
+
+    // ---------------------------------------------------------------- 选图
+
+    private func load(_ item: PhotosPickerItem?, isPhoto: Bool) {
+        guard let item else { return }
+        Task { @MainActor in
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let img = UIImage(data: data) {
+                if isPhoto { ed.setPhoto(img) } else { ed.setDecal(img) }
+            } else {
+                ed.toast = "这张图片读不出来"
+            }
+            if isPhoto { photoItem = nil } else { decalItem = nil }
+        }
+    }
+
+    private func autoHide(_ t: String) {
+        guard !t.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            if ed.toast == t { ed.toast = "" }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 手柄叠加
+
+private struct Handles: View {
+    let ed: Editor
+
+    var body: some View {
+        Canvas { ctx, _ in
+            guard ed.hasPhoto, ed.corners.count == 4 else { return }
+
+            var plane = Path()
+            for (i, c) in ed.corners.enumerated() {
+                let p = ed.toScreen(c)
+                if i == 0 { plane.move(to: p) } else { plane.addLine(to: p) }
+            }
+            plane.closeSubpath()
+            ctx.stroke(plane, with: .color(cAccent2.opacity(0.92)), lineWidth: 1.6)
+
+            if ed.mode == .decal {
+                let q = ed.decalQuadScreen()
+                if q.count == 4 {
+                    var p2 = Path()
+                    p2.addLines(q)
+                    p2.closeSubpath()
+                    ctx.stroke(p2, with: .color(.white.opacity(0.85)),
+                               style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                 }
             }
-        }
-    }
 
-    /// 回一句提示给页面里的 toast，不然 iOS 上是"点了没反应"
-    private func reply(_ webView: WKWebView?, _ text: String) {
-        DispatchQueue.main.async {
-            let esc = text
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-                .replacingOccurrences(of: "\n", with: " ")
-            webView?.evaluateJavaScript(
-                "window.__nativeResult && window.__nativeResult('\(esc)')",
-                completionHandler: nil)
+            for c in ed.corners {
+                let p = ed.toScreen(c)
+                let r: CGFloat = ed.mode == .corner ? 12 : 8
+                let rect = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
+                let dot = Path(ellipseIn: rect)
+                ctx.fill(dot, with: .color(cAccent.opacity(ed.mode == .corner ? 0.95 : 0.42)))
+                ctx.stroke(dot, with: .color(.white), lineWidth: 2.2)
+            }
         }
     }
 }
 
-#Preview {
-    ContentView()
+// ---------------------------------------------------------------- 小样式
+
+private extension View {
+    func chipBG(_ on: Bool = false) -> some View {
+        self
+            .font(.system(size: 13))
+            .foregroundStyle(on ? Color(red: 0.561, green: 0.890, blue: 0.949) : Color.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(on ? Color(red: 0.169, green: 0.231, blue: 0.271) : cChip)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9)
+                .stroke(on ? Color(red: 0.247, green: 0.416, blue: 0.471) : cLine))
+    }
 }
