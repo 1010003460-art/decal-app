@@ -197,21 +197,29 @@ void main(){
   float a = dt.a * cov;
   if (a > 0.002) {
     float kk = mix(1.0, clamp(surf / max(uAnchor, 0.02), 0.25, 2.5), uShade);
-    float L = dot(dt.rgb, vec3(0.2126, 0.7152, 0.0722));
 
-    // ---- 光照层：印刷品在明暗两端都会掉饱和 ----
-    // 亮处过曝趋白，暗处被环境散射光冲淡趋灰。cs = min(kk,1/kk) 对两端对称、只降不升。
+    // ---- 光照层 ----
+    // 顺序不能换：整体系数 → 滚降 → 降饱和。
+    // 旧版先算 vec3(L*kk) 再和色度相加、最后 clamp：撞顶的通道被单独削掉，色相跟着漂
+    // （实测 kk=2.5 时绿 (0.15,0.65,0.25) 削成纯白，Δhue -132°）。暗部则是色度把亮度
+    // 补回去，压暗不足。改成整体乘之后色相严格不变，滚降也不改色相。
+    vec3 paint = dt.rgb * kk;
+    float mx = max(max(paint.r, paint.g), paint.b);
+    if (mx > 1.0) paint /= mx;
+
+    // 两端降饱和：cs = min(kk,1/kk) 对两端对称、只降不升。
     // 旧版 pow(kk,0.42) 在 kk<1 时反而抬饱和（0.5^0.42=0.75>0.5），跟物理相反。
+    // paint 已在 [0,1]，chroma 再乘 <=1 的增益，结果必在 [0,1] 内，不需要 clamp。
     float cs = min(kk, 1.0 / max(kk, 1e-3));
     float chromaGain = pow(cs, 0.4 * uShade);
-
-    vec3 paint = vec3(L * kk) + (dt.rgb - vec3(L)) * chromaGain;
+    float Lx = dot(paint, vec3(0.2126, 0.7152, 0.0722));
+    paint = vec3(Lx) + (paint - vec3(Lx)) * chromaGain;
 
     // ---- 阴影混环境色：只降饱和会发脏，真实是周围表面的散射光渗进来 ----
     float haze = clamp(1.0 - kk, 0.0, 1.0) * 0.35 * uShade;
     paint = mix(paint, base, haze);
 
-    base = mix(base, clamp(paint, 0.0, 1.0), a);
+    base = mix(base, paint, a);
   }
 
   fragColor = vec4(base, 1.0);

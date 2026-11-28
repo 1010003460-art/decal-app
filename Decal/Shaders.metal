@@ -104,25 +104,35 @@ fragment float4 fs_main(VOut in [[stage_in]],
     float a = dt.a * cov;
     if (a > 0.002) {
         float kk = mix(1.0, clamp(surf / max(u.anchor, 0.02), 0.25, 2.5), u.shade);
-        float L  = dot(dt.rgb, LUMA);
 
-        // ---- 光照层：印刷品在明暗两端都会掉饱和 ----
-        // 亮处过曝趋于白，暗处被环境散射光冲淡趋于灰。
-        // cs = min(kk, 1/kk) 是「离中性有多远」，对两端对称，只降不升。
-        // 旧版 pow(kk, 0.42) 在 kk<1 时反而抬饱和（0.5^0.42 = 0.75 > 0.5），
-        // 暗部贴花的颜色比源图还纯，跟物理相反 —— 这是换掉它的原因，不是调参。
+        // ---- 光照层 ----
+        // 顺序不能换：整体系数 → 滚降 → 降饱和。
+        // 旧版先算 float3(L*kk) 再和色度相加、最后 clamp：撞顶的通道被单独削掉，
+        // 色相跟着漂。实测 kk=2.5 时绿 (0.15,0.65,0.25) 被削成纯白（Δhue -132°）、
+        // 洋红 -20.5°；暗部则是色度把亮度补回去，压暗不足（青 0.158 vs 应为 0.124）。
+        float3 paint = dt.rgb * kk;          // 整体乘：色相与通道比例严格不变
+        float mx = max(max(paint.r, paint.g), paint.b);
+        if (mx > 1.0) paint /= mx;           // 过曝整体滚降，最亮通道到 1，不烧白
+
+        // 两端降饱和：cs = min(kk,1/kk) 是「离中性多远」，对称、只降不升。
+        // 旧版 pow(kk, 0.42) 在 kk<1 反而抬饱和（0.5^0.42 = 0.75 > 0.5），物理相反。
+        // 此时 paint 每个分量都在 [0,1]，chroma 再乘一个 <=1 的增益，
+        // 结果数学上落在 [0,1] 内 —— 所以这里不需要 clamp 兜底。
         float cs = min(kk, 1.0 / max(kk, 1e-3));
         float chromaGain = pow(cs, 0.4 * u.shade);
-
-        float3 paint = float3(L * kk) + (dt.rgb - float3(L)) * chromaGain;
+        float Lx = dot(paint, LUMA);
+        paint = float3(Lx) + (paint - float3(Lx)) * chromaGain;
 
         // ---- 阴影混环境色 ----
         // 只降饱和会变灰发脏（污渍感）。阴影里真实发生的是周围表面的散射光渗进来，
         // 所以往当前表面的颜色 base 上靠，而不是往灰上靠。
+        // 代价：base 是逐像素的，最暗处 haze 上限 0.26，会把底下的纹理带进来
+        // （实测高频残差 std 0.10 → 0.026，约 6.6/255，深色贴花上看不出来）。
+        // 要彻底消除得再传一张低频彩色图，那是一个新纹理，暂不做。
         float haze = clamp(1.0 - kk, 0.0, 1.0) * 0.35 * u.shade;
         paint = mix(paint, base, haze);
 
-        base = mix(base, clamp(paint, 0.0, 1.0), a);
+        base = mix(base, paint, a);
     }
 
     return float4(base, 1.0);
