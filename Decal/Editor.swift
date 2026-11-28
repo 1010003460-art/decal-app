@@ -120,6 +120,9 @@ final class Editor: ObservableObject {
 
     // 锚点亮度用的低分辨率灰度图（替代 Web 版的 128px 盒式模糊）
     private var lowLum: [Double] = []
+    /// 3×3 模糊后的版本，就是 lightTex 里存的那份数值。anchor 必须从这里取，
+    /// 否则和 shader 采样到的 surf 不是同一个量。
+    private var lowBlur: [Double] = []
     private var lowW = 32
     private var lowH = 1
 
@@ -488,6 +491,7 @@ final class Editor: ObservableObject {
     private func buildLightTex() {
         guard let device, lowW > 0, lowH > 0, lowLum.count >= lowW * lowH else { return }
         var px = [UInt8](repeating: 0, count: lowW * lowH)
+        var blurred = [Double](repeating: 0.2, count: lowW * lowH)
         for y in 0..<lowH {
             for x in 0..<lowW {
                 var s = 0.0, n = 0.0
@@ -498,17 +502,25 @@ final class Editor: ObservableObject {
                         s += lowLum[yy * lowW + xx]; n += 1
                     }
                 }
-                px[y * lowW + x] = UInt8(max(0, min(255, ((s / n) * 255).rounded())))
+                let v = s / n
+                blurred[y * lowW + x] = v
+                px[y * lowW + x] = UInt8(max(0, min(255, (v * 255).rounded())))
             }
         }
+        lowBlur = blurred
         lightTex = px.withUnsafeBytes { raw in
             TextureIO.r8(bytes: raw.baseAddress!, width: lowW, height: lowH,
                          bytesPerRow: lowW, device: device)
         }
     }
 
+    /// 锚点处的局部平均亮度 —— 与 Web 版 `recomputeAnchor` 取同一个量：模糊图上的单点。
+    /// 必须读 `lowBlur`（模糊后）而不是 `lowLum`（原始 32px）：shader 的 surf 采样的是
+    /// lightTex，也就是模糊后的值。两边口径不一致时，贴花中心处的 kk 不等于 1，
+    /// 「贴花中心亮度 = 它压着的表面亮度」这个定义就不成立了。
+    /// 实测 face.png 上模糊前后相对误差 21.2%（暗部），会直接变成整体过曝/欠曝。
     private func recomputeAnchor() {
-        guard !lowLum.isEmpty, let hMat, imgW > 0, imgH > 0 else { anchor = 0.2; return }
+        guard !lowBlur.isEmpty, let hMat, imgW > 0, imgH > 0 else { anchor = 0.2; return }
         guard let p = hMat.map(Double(center.x), Double(center.y)),
               p.x.isFinite, p.y.isFinite else { return }
 
@@ -517,16 +529,9 @@ final class Editor: ObservableObject {
         let by = byTop     // CGBitmapContext 的 data row 0 就是图像顶部（与 canvas getImageData 同）；
                            // 原点在左下只影响 draw 的 rect 解释，不影响存储行序 —— 不要再翻一次
 
-        var sum = 0.0, n = 0.0
-        for dy in -1...1 {
-            for dx in -1...1 {
-                let x = bx + dx, y = by + dy
-                guard x >= 0, x < lowW, y >= 0, y < lowH else { continue }
-                sum += lowLum[y * lowW + x]
-                n += 1
-            }
-        }
-        anchor = max(0.03, n > 0 ? sum / n : 0.2)
+        // lowBlur 本身已经是 3×3 平滑过的，单点取法不脆；再套一层 3×3 反而和 surf
+        // 的 3×3 又差一轮，口径重新错开。
+        anchor = max(0.03, lowBlur[by * lowW + bx])
     }
 
     // ---------------------------------------------------------------- 手势
