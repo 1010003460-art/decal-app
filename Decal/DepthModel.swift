@@ -72,9 +72,10 @@ final class DepthModel {
     /// 不能让 App 崩、也不能静默给一张全零的图（那会让弧长扭曲变成一条直线）。
     func infer(_ cg: CGImage) -> Depth? {
         guard let model, let pb = DepthModel.pixelBuffer(from: cg) else { return nil }
-        let input = MLDictionaryFeatureProvider(
-            dictionary: [inputName: MLFeatureValue(pixelBuffer: pb)])
-        guard let out = try? model.prediction(from: input) else { return nil }
+        // MLDictionaryFeatureProvider 的构造器本身是 throwing（会校验 feature 名）
+        guard let input = try? MLDictionaryFeatureProvider(
+                dictionary: [inputName: MLFeatureValue(pixelBuffer: pb)]),
+              let out = try? model.prediction(from: input) else { return nil }
 
         // 输出名字理论上就是 "depth"，但如果换包了，退化成「第一个能读成灰度的输出」
         if let fv = out.featureValue(for: outputName), let d = DepthModel.depth(from: fv) { return d }
