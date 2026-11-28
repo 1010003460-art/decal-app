@@ -80,6 +80,17 @@ final class Editor: ObservableObject {
     /// 实际绑给 texture(2) 的那张
     private var occlTex: MTLTexture? { occlEnabled ? (occlMask ?? occlOnes) : occlOnes }
 
+    // ---- 光照场（texture(3)）----
+    /// 低频亮度图（32px 宽，r8Unorm）。贴花的不透明感靠它。
+    /// 用逐像素亮度做融合，贴花会把底下的砖缝、手写字、毛孔一起搬上来 ——
+    /// 那是半透明叠加，不是印刷。实测贴花区内的高频残差 std ≈ 0.10~0.13，
+    /// 在浅色/白色贴花上肉眼一眼能看出来。不透明贴纸只跟随「这块表面的整体受光」。
+    private var lightTex: MTLTexture?
+    /// 1×1 中灰（51/255 = 0.2 = anchor 的初值）兜底：光照场没建出来时
+    /// kk = 0.2/0.2 = 1，贴花原样显示，不会整块变黑
+    private var lightFallback: MTLTexture?
+    private var lightOn: MTLTexture? { lightTex ?? lightFallback }
+
     // ---- 几何 ----
     private(set) var imgW: Double = 0
     private(set) var imgH: Double = 0
@@ -150,6 +161,7 @@ final class Editor: ObservableObject {
         // 1×1 全白：shader 里 texture(2) 永远有东西可采，开关只换绑哪张图
         occlOnes = TextureIO.solid(255, device: dev)
         if occlOnes == nil { initError = "遮挡用的默认纹理创建失败" }
+        lightFallback = TextureIO.solid(51, device: dev)   // 0.2 → kk 恒为 1
 
         if let def = Editor.makeDefaultDecal() { setDecalCG(def) }
     }
@@ -466,6 +478,33 @@ final class Editor: ObservableObject {
             }
         }
         lowLum = out
+        buildLightTex()
+    }
+
+    /// lowLum → 光照场纹理。
+    /// 直接拿 32px 的 lowLum 当纹理会在贴花上出斑块：CGContext 缩小 100 倍以上是**稀疏采样**
+    /// 不是面积平均（原来的 3×3 只覆盖锚点那一个点，全图没处理过）。
+    /// 全图 3×3 模糊一遍，32×21×9 ≈ 6k 次浮点，只在换照片时跑一次。
+    private func buildLightTex() {
+        guard let device, lowW > 0, lowH > 0, lowLum.count >= lowW * lowH else { return }
+        var px = [UInt8](repeating: 0, count: lowW * lowH)
+        for y in 0..<lowH {
+            for x in 0..<lowW {
+                var s = 0.0, n = 0.0
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        let xx = x + dx, yy = y + dy
+                        guard xx >= 0, xx < lowW, yy >= 0, yy < lowH else { continue }
+                        s += lowLum[yy * lowW + xx]; n += 1
+                    }
+                }
+                px[y * lowW + x] = UInt8(max(0, min(255, ((s / n) * 255).rounded())))
+            }
+        }
+        lightTex = px.withUnsafeBytes { raw in
+            TextureIO.r8(bytes: raw.baseAddress!, width: lowW, height: lowH,
+                         bytesPerRow: lowW, device: device)
+        }
     }
 
     private func recomputeAnchor() {
@@ -633,7 +672,7 @@ final class Editor: ObservableObject {
               let cb = queue.makeCommandBuffer(),
               let enc = cb.makeRenderCommandEncoder(descriptor: rpd) else { return }
 
-        if let photoTex, let hInv, let occl = occlTex, imgW > 0 {
+        if let photoTex, let hInv, let occl = occlTex, let light = lightOn, imgW > 0 {
             let cs = view.contentScaleFactor
             let (hu2, hv2) = decalHalf()
             var u = Uniforms(
@@ -655,6 +694,7 @@ final class Editor: ObservableObject {
             enc.setFragmentTexture(photoTex, index: 0)
             enc.setFragmentTexture(decalTex, index: 1)
             enc.setFragmentTexture(occl, index: 2)
+            enc.setFragmentTexture(light, index: 3)
             if let s = sampler { enc.setFragmentSamplerState(s, index: 0) }
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
@@ -667,7 +707,7 @@ final class Editor: ObservableObject {
     // ---------------------------------------------------------------- 导出
 
     func exportImage() -> UIImage? {
-        guard let photoTex, let hInv, let occl = occlTex, imgW > 0,
+        guard let photoTex, let hInv, let occl = occlTex, let light = lightOn, imgW > 0,
               let device, let queue, let pipeline else { return nil }
 
         var w = Int(imgW), h = Int(imgH)
@@ -713,6 +753,7 @@ final class Editor: ObservableObject {
         enc.setFragmentTexture(photoTex, index: 0)
         enc.setFragmentTexture(decalTex, index: 1)
         enc.setFragmentTexture(occl, index: 2)
+        enc.setFragmentTexture(light, index: 3)
         if let s = sampler { enc.setFragmentSamplerState(s, index: 0) }
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()

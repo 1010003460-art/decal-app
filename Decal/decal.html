@@ -138,6 +138,7 @@ precision highp float;
 
 uniform sampler2D uPhoto;      // 原照片
 uniform sampler2D uDecal;      // 贴花图（带 alpha）
+uniform sampler2D uLight;      // 光照场（128px 低频亮度，buildBlur 产出）
 uniform vec2  uCanvas;         // 目标画布尺寸（设备像素）
 uniform vec2  uImg;            // 照片像素尺寸
 uniform vec2  uOffset;         // 图像原点在画布上的偏移（设备像素）
@@ -160,10 +161,10 @@ void main(){
   vec2 t  = ip / uImg;
 
   vec3 base = texture(uPhoto, t).rgb;
-  // 表面亮度 = 这个像素本身的亮度（不是模糊过的低频图）。
-  // 用模糊图会把砖缝、标签边缘、皱褶全抹平，融合就只剩整体调色，看着像没效果；
-  // 用原像素才能让表面纹理透过贴花显出来 —— 这也是 Web 端实测下来最像印刷的做法。
-  float surf = dot(base, vec3(0.2126, 0.7152, 0.0722));
+  // 表面亮度用低频光照场，不用逐像素：不透明贴纸不会透出底下的砖缝、手写字。
+  // 逐像素 = 半透明叠加（iOS 端实测贴花区内高频残差 std 0.10~0.13，浅色贴花一眼看出）。
+  // 这块低频图就是下面 buildBlur() 产出的 128px 模糊图，注释本来也写着「不该进贴花」。
+  float surf = texture(uLight, t).r;
 
   // ---- 平面坐标 ----
   vec3 hq = uHinv * vec3(ip, 1.0);
@@ -196,9 +197,20 @@ void main(){
   float a = dt.a * cov;
   if (a > 0.002) {
     float kk = mix(1.0, clamp(surf / max(uAnchor, 0.02), 0.25, 2.5), uShade);
-    // 只压亮度、慢压色度：直接乘 rgb 会让暗部的字发灰发闷，像污渍
     float L = dot(dt.rgb, vec3(0.2126, 0.7152, 0.0722));
-    vec3 paint = vec3(L) * kk + (dt.rgb - vec3(L)) * pow(kk, 0.42);
+
+    // ---- 光照层：印刷品在明暗两端都会掉饱和 ----
+    // 亮处过曝趋白，暗处被环境散射光冲淡趋灰。cs = min(kk,1/kk) 对两端对称、只降不升。
+    // 旧版 pow(kk,0.42) 在 kk<1 时反而抬饱和（0.5^0.42=0.75>0.5），跟物理相反。
+    float cs = min(kk, 1.0 / max(kk, 1e-3));
+    float chromaGain = pow(cs, 0.4 * uShade);
+
+    vec3 paint = vec3(L * kk) + (dt.rgb - vec3(L)) * chromaGain;
+
+    // ---- 阴影混环境色：只降饱和会发脏，真实是周围表面的散射光渗进来 ----
+    float haze = clamp(1.0 - kk, 0.0, 1.0) * 0.35 * uShade;
+    paint = mix(paint, base, haze);
+
     base = mix(base, clamp(paint, 0.0, 1.0), a);
   }
 
@@ -227,7 +239,7 @@ if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgram
 gl.useProgram(prog);
 
 const UN = {};
-['uPhoto', 'uDecal', 'uCanvas', 'uImg', 'uOffset', 'uScale', 'uHinv',
+['uPhoto', 'uDecal', 'uLight', 'uCanvas', 'uImg', 'uOffset', 'uScale', 'uHinv',
  'uCenter', 'uHalf', 'uRot', 'uShade', 'uContact', 'uContactPx', 'uAnchor']
   .forEach(n => UN[n] = gl.getUniformLocation(prog, n));
 
@@ -255,7 +267,13 @@ function upload(tex, src) {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
 }
 
-const texPhoto = newTex(), texDecal = newTex();
+const texPhoto = newTex(), texDecal = newTex(), texLight = newTex();
+// 兜底：照片还没加载时 1×1 中灰，kk 恒为 1，贴花原样显示（不会整块变黑）。
+// 注意不能用 upload()：它走 6 个参数的 texImage2D（从 Image 推导宽高），
+// ArrayBufferView 必须显式给 width/height，否则抛 TypeError、整页脚本停在那行。
+gl.bindTexture(gl.TEXTURE_2D, texLight);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+              new Uint8Array([51, 51, 51, 255]));
 
 // ---------------------------------------------------------------- 单应矩阵
 // 与 Decal/Homography.swift、verify_homography.mjs 同一套算法（8×8 高斯消元）
@@ -389,7 +407,8 @@ function buildBlur() {
     p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255;
   }
   x.putImageData(id, 0, 0);
-  blurC = c; blurCtx = x;   // 只用来取"锚点处的局部平均亮度"，不参与渲染
+  blurC = c; blurCtx = x;   // 取锚点局部平均亮度
+  upload(texLight, c);      // 同一张图同时当光照场贴给 shader
 }
 
 function recomputeAnchor() {
@@ -455,6 +474,7 @@ function drawAt(o) {
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texPhoto); gl.uniform1i(UN.uPhoto, 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texDecal); gl.uniform1i(UN.uDecal, 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texLight); gl.uniform1i(UN.uLight, 2);
 
   gl.uniform2f(UN.uCanvas, o.w, o.h);
   gl.uniform2f(UN.uImg, S.W, S.H);

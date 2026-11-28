@@ -41,6 +41,8 @@ fragment float4 fs_main(VOut in [[stage_in]],
                         // 遮挡 mask（前景物体分割）。走独立纹理而不是 uniform 字段：
                         // Uniforms 是 112 字节的硬约束，加字段要两侧同时改、漏一个整屏错位。
                         texture2d<float> ocl   [[texture(2)]],
+                        // 光照场：32px 宽的低频亮度图。同样走纹理，零 uniform 字段。
+                        texture2d<float> lit   [[texture(3)]],
                         sampler smp [[sampler(0)]]) {
     const float3 BG   = float3(0.043, 0.047, 0.055);
     const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
@@ -54,8 +56,13 @@ fragment float4 fs_main(VOut in [[stage_in]],
     if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) return float4(BG, 1.0);
 
     float3 base = photo.sample(smp, t).rgb;
-    // 用原像素亮度，不用模糊图：模糊会把砖缝、标签边缘抹平，融合就只剩整体调色
-    float surf = dot(base, LUMA);
+
+    // ---- 光照场 ----
+    // 不透明贴纸不会透出底下的砖缝、手写字、毛孔，只跟随这块表面的整体受光。
+    // 用逐像素亮度做融合 = 半透明叠加，看着就是「一张有透明度的图贴上去」。
+    // 实测贴花区内的高频残差 std ≈ 0.10~0.13，浅色贴花上一眼能看出来。
+    // 这张 32px 的低频图由 Editor.buildLightTex 生成（含 3×3 模糊，防稀疏采样噪点）。
+    float surf = lit.sample(smp, t).r;
 
     // ---- 平面坐标 ----
     float3 hq = u.hinv * float3(ip, 1.0);
@@ -97,9 +104,24 @@ fragment float4 fs_main(VOut in [[stage_in]],
     float a = dt.a * cov;
     if (a > 0.002) {
         float kk = mix(1.0, clamp(surf / max(u.anchor, 0.02), 0.25, 2.5), u.shade);
-        // 只压亮度、慢压色度：直接乘 rgb 会让暗部的字发灰发闷，像污渍
-        float L = dot(dt.rgb, LUMA);
-        float3 paint = float3(L) * kk + (dt.rgb - float3(L)) * pow(kk, 0.42);
+        float L  = dot(dt.rgb, LUMA);
+
+        // ---- 光照层：印刷品在明暗两端都会掉饱和 ----
+        // 亮处过曝趋于白，暗处被环境散射光冲淡趋于灰。
+        // cs = min(kk, 1/kk) 是「离中性有多远」，对两端对称，只降不升。
+        // 旧版 pow(kk, 0.42) 在 kk<1 时反而抬饱和（0.5^0.42 = 0.75 > 0.5），
+        // 暗部贴花的颜色比源图还纯，跟物理相反 —— 这是换掉它的原因，不是调参。
+        float cs = min(kk, 1.0 / max(kk, 1e-3));
+        float chromaGain = pow(cs, 0.4 * u.shade);
+
+        float3 paint = float3(L * kk) + (dt.rgb - float3(L)) * chromaGain;
+
+        // ---- 阴影混环境色 ----
+        // 只降饱和会变灰发脏（污渍感）。阴影里真实发生的是周围表面的散射光渗进来，
+        // 所以往当前表面的颜色 base 上靠，而不是往灰上靠。
+        float haze = clamp(1.0 - kk, 0.0, 1.0) * 0.35 * u.shade;
+        paint = mix(paint, base, haze);
+
         base = mix(base, clamp(paint, 0.0, 1.0), a);
     }
 

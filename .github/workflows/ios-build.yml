@@ -29,6 +29,10 @@ jobs:
       - name: JS reference check
         run: node verify_homography.mjs
 
+      # 光照层数学：亮度守恒 / 饱和度只降不升 / shade=0 完整退化。纯标准库，不需要 numpy
+      - name: Light layer check
+        run: python3 test/light_check.py
+
       - name: Generate Xcode project
         run: xcodegen generate
 
