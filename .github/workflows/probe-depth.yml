@@ -5,6 +5,10 @@ name: Probe Depth Model
 # 拿到结果后这个 workflow 可以删。
 
 on:
+  push:
+    paths:
+      - ".github/workflows/probe-depth.yml"
+      - "test/run_depth.swift"
   workflow_dispatch:
 
 jobs:
