@@ -57,9 +57,8 @@ jobs:
           }
           print("=== metadata ===")
           print("  author:", d.metadata[.author] ?? "-")
-          print("  short:", d.metadata[.shortDescription] ?? "-")
+          print("  short:", d.metadata[MLModelMetadataKey.description] ?? "-")
           print("  version:", d.metadata[.versionString] ?? "-")
-          print("  creator:", d.creator ?? "-")
 
           // 真跑一次：随机输入，看输出形状与数值范围
           if let (name, desc) = d.inputDescriptionsByName.first(where: { $0.value.multiArrayConstraint != nil }),
