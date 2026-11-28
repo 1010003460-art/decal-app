@@ -58,23 +58,63 @@ let cfg = MLModelConfiguration()
 cfg.computeUnits = .cpuOnly
 let model = try MLModel(contentsOf: compiled, configuration: cfg)
 
+print("=== declared outputs ===")
+for (k, v) in model.modelDescription.outputDescriptionsByName {
+    print("  \(k): type=\(v.type.rawValue) multiArray=\(v.multiArrayConstraint?.shape ?? []) image=\(v.imageConstraint.map { "\($0.pixelsWide)x\($0.pixelsHigh)" } ?? "-")")
+}
+
+/// 把输出 FeatureValue 统一转成 (灰度数组, 宽, 高)。multiArray 和 image 两种都要支持。
+func grayFrom(_ fv: MLFeatureValue) -> ([Float], Int, Int)? {
+    if let ma = fv.multiArrayValue {
+        var vals = [Float](repeating: 0, count: ma.count)
+        for i in 0..<ma.count { vals[i] = ma[i].floatValue }
+        let w = ma.shape.last!.intValue
+        let h = ma.shape.count >= 2 ? ma.shape[ma.shape.count - 2].intValue : 1
+        return (vals, w, h)
+    }
+    if let pb = fv.imageBufferValue {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let bpr = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        var vals = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            let row = base.advanced(by: y * bpr)
+            if fmt == kCVPixelFormatType_OneComponent32Float {
+                let p = row.bindMemory(to: Float.self, capacity: w)
+                for x in 0..<w { vals[y * w + x] = p[x] }
+            } else if fmt == kCVPixelFormatType_OneComponent16Half {
+                let p = row.bindMemory(to: UInt16.self, capacity: w)
+                for x in 0..<w { vals[y * w + x] = Float(Float16(bitPattern: p[x])) }
+            } else {                     // 32BGRA
+                let p = row.bindMemory(to: UInt8.self, capacity: w * 4)
+                for x in 0..<w { vals[y * w + x] = Float(p[x * 4]) / 255.0 }
+            }
+        }
+        return (vals, w, h)
+    }
+    return nil
+}
+
 let root = ProcessInfo.processInfo.environment["DECAL_ROOT"] ?? "."
 for name in ["bottle", "face", "building"] {
     guard let img = load("\(root)/test/\(name).png"),
           let pb = pixelBuffer(img) else { print("skip \(name)"); continue }
     let prov = try MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: pb)])
     let out = try model.prediction(from: prov)
-    guard let ma = out.featureValue(for: "depth")?.multiArrayValue else {
-        print("no depth output for \(name)"); continue
+
+    guard let key = out.featureNames.first(where: { grayFrom(out.featureValue(for: $0)!) != nil }),
+          let (vals, w, h) = grayFrom(out.featureValue(for: key)!) else {
+        print("no usable output for \(name): \(out.featureNames)")
+        continue
     }
 
-    var vals = [Float](repeating: 0, count: ma.count)
-    for i in 0..<ma.count { vals[i] = ma[i].floatValue }
     let sorted = vals.sorted()
     let mn = sorted.first!, mx = sorted.last!
-    let p10 = sorted[ma.count / 10], p90 = sorted[ma.count * 9 / 10]
-    print("\(name): shape=\(ma.shape) dtype=\(ma.dataType.rawValue) count=\(ma.count)")
-    print("   min=\(mn) max=\(mx) p10=\(p10) p90=\(p90)")
+    let p10 = sorted[vals.count / 10], p90 = sorted[vals.count * 9 / 10]
+    print("\(name): out=\(key) size=\(w)x\(h) min=\(mn) max=\(mx) p10=\(p10) p90=\(p90)")
 
     // 数值大 → 是「相对深度」（远处数值大）；取倒数变视差，近处亮
     let inverted = mx > 3.0
@@ -84,8 +124,6 @@ for name in ["bottle", "face", "building"] {
     for i in 0..<norm.count { norm[i] = (norm[i] - nmin) / max(nmax - nmin, 1e-6) }
     print("   inverted=\(inverted)")
 
-    let w = ma.shape.last!.intValue
-    let h = ma.shape[ma.shape.count - 2].intValue
     writeGray(norm, w: w, h: h, path: "/tmp/depth/\(name)_depth.png")
 }
 print("done")
