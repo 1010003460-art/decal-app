@@ -22,6 +22,9 @@ diag/*.png
 
 # CI 产物下载目录
 dl/
+dl2/
+shots/
+shots2/
 dist2/
 
 # 项目记忆
