@@ -9,6 +9,7 @@ on:
     paths:
       - ".github/workflows/probe-depth.yml"
       - "test/run_depth.swift"
+      - "test/*.png"
   workflow_dispatch:
 
 jobs:

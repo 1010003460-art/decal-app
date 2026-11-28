@@ -14,6 +14,10 @@ DerivedData/
 test/*.png
 test/*.jpg
 test/*.json
+# 例外：CI 拿这三张跑深度推理，是回归素材不是中间产物
+!test/bottle.png
+!test/face.png
+!test/building.png
 cdp_*/
 dist/
 
