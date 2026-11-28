@@ -1,0 +1,86 @@
+name: Probe Depth Model
+
+# 一次性用途：确认 apple/coreml-depth-anything-v2-small 的实际输入输出签名。
+# 不猜 shape / 字段名 —— 猜错就是整条推理链错的。
+# 拿到结果后这个 workflow 可以删。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model from Hugging Face
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q --upgrade pip huggingface_hub
+          python3 - <<'EOF'
+          from huggingface_hub import snapshot_download
+          p = snapshot_download(
+              "apple/coreml-depth-anything-v2-small",
+              allow_patterns=["DepthAnythingV2SmallF16.mlpackage/*"],
+              local_dir="/tmp/model",
+              local_dir_use_symlinks=False,
+          )
+          print("downloaded ->", p)
+          EOF
+          du -sh /tmp/model/DepthAnythingV2SmallF16.mlpackage
+          ls -la /tmp/model/DepthAnythingV2SmallF16.mlpackage
+
+      - name: Print input/output spec
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q coremltools
+          python3 - <<'EOF'
+          import coremltools as ct
+          p = "/tmp/model/DepthAnythingV2SmallF16.mlpackage"
+          m = ct.models.MLModel(p)
+          s = m.get_spec()
+          print("=== inputs ===")
+          for i in s.description.input:
+              print(f"  name={i.name!r}  type={i.type}")
+              if i.type.WhichOneof("Type") == "imageType":
+                  it = i.type.imageType
+                  print(f"    width={it.width} height={it.height} colorspace={it.colorSpace}")
+              if i.type.WhichOneof("Type") == "multiArrayType":
+                  ma = i.type.multiArrayType
+                  print(f"    shape={list(ma.shape)} dtype={ma.dataType}")
+          print("=== outputs ===")
+          for o in s.description.output:
+              print(f"  name={o.name!r}  type={o.type}")
+              if o.type.WhichOneof("Type") == "multiArrayType":
+                  ma = o.type.multiArrayType
+                  print(f"    shape={list(ma.shape)} dtype={ma.dataType}")
+          print("=== metadata ===")
+          print("  author:", s.description.metadata.author)
+          print("  short:", s.description.metadata.shortDescription)
+          print("  version:", s.description.metadata.versionString)
+          # 各层名称里带 depth 的，确认输出通道含义
+          names = [l.name for l in s.neuralNetwork.layers] if s.HasField("neuralNetwork") else []
+          print("  layers:", len(names))
+          print("  tail:", names[-6:])
+          EOF
+
+      - name: Check whether a traced forward pass runs on CPU
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import numpy as np, coremltools as ct
+          p = "/tmp/model/DepthAnythingV2SmallF16.mlpackage"
+          cfg = ct.ComputeUnit.CPU_ONLY
+          m = ct.models.MLModel(p, compute_units=cfg)
+          spec = m.get_spec()
+          inp = spec.description.input[0]
+          shape = [int(d) for d in inp.type.multiArrayType.shape] if inp.type.WhichOneof("Type") == "multiArrayType" else None
+          print("input name", inp.name, "shape", shape)
+          if shape:
+              x = np.random.rand(*shape).astype(np.float32)
+              out = m.predict({inp.name: x})
+              for k, v in out.items():
+                  a = np.asarray(v)
+                  print(f"  out {k}: shape={a.shape} dtype={a.dtype} min={a.min():.6f} max={a.max():.6f} mean={a.mean():.6f}")
+          EOF
