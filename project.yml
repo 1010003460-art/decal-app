@@ -20,6 +20,14 @@ targets:
       - path: Decal
         excludes:
           - "decal.html"
+      # 深度模型（Depth Anything V2 Small）。CI 用 coremlcompiler 把 mlpackage
+      # 编译成 .mlmodelc 写进这里；仓库里只有 .keep，所以本地也能正常 generate。
+      #
+      # 用 folder + resources 而不是让 Xcode 认成 mlmodel：.mlmodelc 已经是编译产物，
+      # 再被当源码编一次会直接崩在 build 阶段。folder reference 只是原样拷进 bundle 根。
+      - path: Model/DepthAnythingV2SmallF16.mlmodelc
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wancai.decal

@@ -130,6 +130,72 @@ final class ButtonSmokeTests: XCTestCase {
         return (total, left)
     }
 
+    /// 深度预览：点「深度」后画面应该从「左红右蓝」变成灰度。
+    ///
+    /// 判据是**照片区域内的饱和色像素**比例大幅下降 —— 深度图是单通道转出来的灰度，
+    /// 任何饱和色都不该剩下。只统计照片所在的横带，避开控制栏那个青色按钮，
+    /// 否则「控制栏本来就带色」会把判据冲淡。
+    ///
+    /// 这条同时是「模型真的打进包了」的证据：模型缺失时 toggleDepth 会弹
+    /// 「深度模型没打进包」，画面不变，比例不降。
+    func testDepthPreviewTurnsPhotoGrayscale() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-probe-photo", "-probe-decal"]
+        app.launch()
+
+        let depthChip = app.buttons["深度"]
+        XCTAssertTrue(depthChip.waitForExistence(timeout: 60),
+                      "控制栏没出现，或者「深度」chip 没加上")
+        Thread.sleep(forTimeInterval: 8.0)   // 首次要加载 50MB 模型，模拟器上是纯 CPU
+
+        let before = saveShot("depth-off")
+        guard let cgBefore = before.image.cgImage else { return XCTFail("截不出图") }
+        let (n0, s0) = Self.saturatedInPhotoBand(cgBefore)
+        let r0 = n0 > 0 ? Double(s0) / Double(n0) : 0
+
+        depthChip.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        let after = saveShot("depth-on")
+        guard let cgAfter = after.image.cgImage else { return XCTFail("截不出图") }
+        let (n1, s1) = Self.saturatedInPhotoBand(cgAfter)
+        let r1 = n1 > 0 ? Double(s1) / Double(n1) : 0
+
+        XCTAssertFalse(app.staticTexts["深度模型没打进包"].exists,
+                       "模型没进 bundle —— 检查 CI 里 Compile depth model 那一步")
+        XCTAssertGreaterThan(r0, 0.5, "关闭状态的照片区域就该满是红蓝（实际 \(Int(r0 * 100))%），判据本身不成立")
+        XCTAssertLessThan(r1, 0.25,
+                          "开了深度还有 \(Int(r1 * 100))% 饱和像素（关时 \(Int(r0 * 100))%）—— 深度图没绑上去")
+    }
+
+    /// 统计「照片横带」里的高饱和像素占比。
+    /// probe 照片是 3:2 横图，在竖屏画布上垂直居中，实际占屏幕高度的 ~28%~58%。
+    private static func saturatedInPhotoBand(_ cg: CGImage) -> (total: Int, saturated: Int) {
+        let w = cg.width, h = cg.height
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return (0, 0)
+        }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        let y0 = Int(Double(h) * 0.25), y1 = Int(Double(h) * 0.58)
+        var total = 0, sat = 0
+        buf.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: UInt8.self)
+            for y in stride(from: y0, to: y1, by: 2) {
+                for x in stride(from: 0, to: w, by: 2) {
+                    let i = (y * w + x) * 4
+                    let r = Int(p[i]), g = Int(p[i + 1]), b = Int(p[i + 2])
+                    total += 1
+                    let mx = max(r, max(g, b)), mn = min(r, min(g, b))
+                    if mx - mn > 70 { sat += 1 }
+                }
+            }
+        }
+        return (total, sat)
+    }
+
     @discardableResult
     private func saveShot(_ name: String) -> XCUIScreenshot {
         let shot = XCUIScreen.main.screenshot()

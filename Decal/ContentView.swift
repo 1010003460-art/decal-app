@@ -182,7 +182,7 @@ struct ContentView: View {
                 slider("表面融合", value: pbind(\.shade), range: 0...1) { "\(Int($0 * 100))%" }
                 slider("接触阴影", value: pbind(\.contact), range: 0...1) { "\(Int($0 * 100))%" }
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     Text("照片").chipBG()
                 }
@@ -205,6 +205,10 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 Button { ed.toggleOcclusion() } label: {
                     Text("遮挡").chipBG(ed.occlEnabled)
+                }
+                .buttonStyle(.plain)
+                Button { ed.toggleDepth() } label: {
+                    Text("深度").chipBG(ed.showingDepth)
                 }
                 .buttonStyle(.plain)
                 Button { ed.saveToAlbum() } label: {

@@ -91,6 +91,24 @@ final class Editor: ObservableObject {
     private var lightFallback: MTLTexture?
     private var lightOn: MTLTexture? { lightTex ?? lightFallback }
 
+    // ---- 深度（Depth Anything V2 Small）----
+    /// 显示深度预览。这是验证开关，不进导出：开着的时候贴花被顶掉，
+    /// 画布上只剩灰度深度图 —— 一眼能看出模型有没有认出圆柱/桌面的起伏。
+    @Published var showingDepth = false
+    /// 模型输出（518×392，相对深度 0..1）。下一轮做弧长扭曲就吃这个。
+    private var depthMap: DepthModel.Depth?
+    /// 深度预览纹理，尺寸就是深度图自己的尺寸 —— 和照片共用归一化 uv，
+    /// 绑上去位置天然对齐，不需要按照片尺寸放大成 4096² 白烧 67MB
+    private var depthPreview: MTLTexture?
+    /// 1×1 全透明贴花，看深度时绑给 texture(1) 把贴花整块抹掉
+    private var decalBlank: MTLTexture?
+    private var depthPreviewOn: MTLTexture? {
+        (showingDepth ? depthPreview : nil) ?? photoTex
+    }
+    private var decalBinding: MTLTexture? {
+        showingDepth ? (decalBlank ?? decalTex) : decalTex
+    }
+
     // ---- 几何 ----
     private(set) var imgW: Double = 0
     private(set) var imgH: Double = 0
@@ -165,6 +183,7 @@ final class Editor: ObservableObject {
         occlOnes = TextureIO.solid(255, device: dev)
         if occlOnes == nil { initError = "遮挡用的默认纹理创建失败" }
         lightFallback = TextureIO.solid(51, device: dev)   // 0.2 → kk 恒为 1
+        decalBlank = TextureIO.transparent(device: dev)
 
         if let def = Editor.makeDefaultDecal() { setDecalCG(def) }
     }
@@ -185,7 +204,10 @@ final class Editor: ObservableObject {
             let quad = cg.flatMap { Editor.detectQuad($0) }
             // 遮挡分割跟解码共用同一张图，不额外解码一遍
             let mask = cg.flatMap { self.makeOcclusionMask($0) }
-            DispatchQueue.main.async { self.applyPhoto(cg, quad, mask) }
+            // 深度最后跑：模型加载 + 推理是这条链上最慢的一步，
+            // 前面几项先把界面点亮，它算完再补上去（真有 300ms 也感觉不到）
+            let depth = cg.flatMap { DepthModel.shared.infer($0) }
+            DispatchQueue.main.async { self.applyPhoto(cg, quad, mask, depth) }
         }
     }
 
@@ -211,14 +233,18 @@ final class Editor: ObservableObject {
                             device: device)
     }
 
-    private func applyPhoto(_ cg: CGImage?, _ quad: [CGPoint]?, _ mask: MTLTexture?) {
+    private func applyPhoto(_ cg: CGImage?, _ quad: [CGPoint]?,
+                            _ mask: MTLTexture?, _ depth: DepthModel.Depth?) {
         defer { busy = false }
         guard let cg else { toast = "这张图片读不出来"; return }
         imgW = Double(cg.width)
         imgH = Double(cg.height)
         photoTex = tex(cg)
         occlMask = mask
+        depthMap = depth
+        showingDepth = false        // 换图就退回照片，别让人以为照片变黑白了
         buildLowLum(cg)
+        buildDepthPreview()
 
         corners = quad ?? defaultCorners()
         center = CGPoint(x: 0.5, y: 0.5)
@@ -514,6 +540,42 @@ final class Editor: ObservableObject {
         }
     }
 
+    /// 深度图 → 预览纹理。
+    /// 只在可视化时做 min/max 拉伸：模型输出是相对深度，绝对值在不同照片之间没有可比性，
+    /// 但同一张照片内部拉不拉伸只是线性缩放。计算梯度时**绝不能**用拉伸后的值 ——
+    /// 一张几乎全平的照片会被拉出满幅假曲率。
+    private func buildDepthPreview() {
+        guard let device, let d = depthMap, d.width > 0, d.height > 0,
+              d.values.count >= d.width * d.height else {
+            depthPreview = nil
+            return
+        }
+        var mn = Float.greatestFiniteMagnitude
+        var mx = -Float.greatestFiniteMagnitude
+        for v in d.values {
+            if v < mn { mn = v }
+            if v > mx { mx = v }
+        }
+        let span = max(mx - mn, 1e-5)
+
+        var px = [UInt8](repeating: 255, count: d.width * d.height * 4)
+        for i in 0..<(d.width * d.height) {
+            // 近处亮：模型 1 = 近，和灰度直觉一致，不用反相
+            let g = UInt8(max(0, min(255, ((d.values[i] - mn) / span * 255).rounded())))
+            let o = i * 4
+            px[o] = g; px[o + 1] = g; px[o + 2] = g; px[o + 3] = 255
+        }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                            width: d.width, height: d.height,
+                                                            mipmapped: false)
+        desc.usage = .shaderRead
+        guard let t = device.makeTexture(descriptor: desc) else { depthPreview = nil; return }
+        t.replace(region: MTLRegionMake2D(0, 0, d.width, d.height), mipmapLevel: 0,
+                  withBytes: px, bytesPerRow: d.width * 4)
+        depthPreview = t
+    }
+
     /// 锚点处的局部平均亮度 —— 与 Web 版 `recomputeAnchor` 取同一个量：模糊图上的单点。
     /// 必须读 `lowBlur`（模糊后）而不是 `lowLum`（原始 32px）：shader 的 surf 采样的是
     /// lightTex，也就是模糊后的值。两边口径不一致时，贴花中心处的 kk 不等于 1，
@@ -556,6 +618,21 @@ final class Editor: ObservableObject {
         }
         occlEnabled.toggle()
         if occlEnabled { toast = "遮挡已开 · 被前景挡住的部分不画" }
+        invalidate()
+    }
+
+    /// 深度可视化开关。这是「模型到底认不认得出这个表面」的唯一现场证据 ——
+    /// 拿不到深度时明确说清楚，否则点了没反应看起来像 bug。
+    func toggleDepth() {
+        guard hasPhoto else { return }
+        guard depthPreview != nil else {
+            toast = DepthModel.shared.isAvailable
+                ? "这张照片算不出深度"
+                : "深度模型没打进包（CI 里要编译 mlmodelc）"
+            return
+        }
+        showingDepth.toggle()
+        if showingDepth { toast = "深度预览 · 亮＝近 暗＝远，导出时仍是正常照片" }
         invalidate()
     }
 
@@ -696,8 +773,10 @@ final class Editor: ObservableObject {
             )
             enc.setRenderPipelineState(pipeline)
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-            enc.setFragmentTexture(photoTex, index: 0)
-            enc.setFragmentTexture(decalTex, index: 1)
+            // 看深度预览时：texture(0) 换成灰度深度图、texture(1) 换成全透明。
+            // 两者都用归一化 uv 采样，位置天然对齐；贴花的 a 恒为 0，整块不画。
+            enc.setFragmentTexture(depthPreviewOn, index: 0)
+            enc.setFragmentTexture(decalBinding, index: 1)
             enc.setFragmentTexture(occl, index: 2)
             enc.setFragmentTexture(light, index: 3)
             if let s = sampler { enc.setFragmentSamplerState(s, index: 0) }

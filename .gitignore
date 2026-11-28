@@ -24,9 +24,19 @@ dist/
 # 诊断出图
 diag/*.png
 
+# 深度模型是 CI 用 coremlcompiler 现编的（~50MB），不入库。
+# 只保留占位目录里的 .keep，这样 XcodeGen 永远能解析到这个路径 ——
+# 本地没有模型时构建照常成功，运行时 isAvailable = false，UI 会明说「模型没打进包」。
+Model/*.mlmodelc/*
+!Model/*.mlmodelc/.keep
+
 # CI 产物下载目录
 dl/
 dl2/
+depthmaps/
+dm.zip
+probe*.zip
+probelogs*/
 shots/
 shots2/
 dist2/

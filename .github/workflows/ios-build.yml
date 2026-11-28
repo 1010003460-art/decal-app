@@ -33,6 +33,42 @@ jobs:
       - name: Light layer check
         run: python3 test/light_check.py
 
+      # 深度模型 ~50MB，本地 HF 不通、也不该入库，CI 下载一次后走缓存
+      - name: Cache depth model
+        id: cache-depth-model
+        uses: actions/cache@v4
+        with:
+          path: /tmp/model
+          key: depth-anything-v2-small-f16-v1
+
+      - name: Download depth model
+        if: steps.cache-depth-model.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q --upgrade pip huggingface_hub
+          /tmp/venv/bin/python -c "from huggingface_hub import snapshot_download as s; s('apple/coreml-depth-anything-v2-small', allow_patterns=['DepthAnythingV2SmallF16.mlpackage/*'], local_dir='/tmp/model')"
+          du -sh /tmp/model/DepthAnythingV2SmallF16.mlpackage
+
+      # mlpackage → mlmodelc。App 里只认编译产物，运行时不再编译（那要十几秒）
+      - name: Compile depth model
+        run: |
+          set -euo pipefail
+          rm -rf Model/DepthAnythingV2SmallF16.mlmodelc
+          xcrun coremlcompiler compile \
+            /tmp/model/DepthAnythingV2SmallF16.mlpackage Model/
+          ls -la Model/DepthAnythingV2SmallF16.mlmodelc
+          du -sh Model/DepthAnythingV2SmallF16.mlmodelc
+
+      # 编译真源码跑一遍推理，钉住「模型能加载 / 输出 518×392 / 值域 0..1 /
+      # 认得出圆柱曲率 / 前景比背景近」。模拟器 UI 测试要 7 分钟，
+      # 这一步 5 秒，失败时能立刻分清是模型层还是渲染层的问题。
+      - name: Depth model boot check
+        run: |
+          set -euo pipefail
+          swiftc -O Decal/DepthModel.swift test/DepthBootCheck.swift -o /tmp/dchk
+          DECAL_ROOT="$GITHUB_WORKSPACE" /tmp/dchk
+
       - name: Generate Xcode project
         run: xcodegen generate
 

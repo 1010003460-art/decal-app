@@ -62,6 +62,20 @@ enum TextureIO {
         return r8(bytes: &b, width: 1, height: 1, bytesPerRow: 1, device: device)
     }
 
+    /// 1×1 全透明（BGRA 全 0）。看深度预览时绑给 texture(1)，
+    /// shader 里 `a = dt.a * cov` 恒为 0，贴花整块不画 ——
+    /// 比「加一个 uniform 开关 + 分支」便宜，也不需要改 112 字节布局。
+    static func transparent(device: MTLDevice) -> MTLTexture? {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                         width: 1, height: 1, mipmapped: false)
+        d.usage = .shaderRead
+        guard let t = device.makeTexture(descriptor: d) else { return nil }
+        var px: UInt32 = 0
+        t.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                  withBytes: &px, bytesPerRow: 4)
+        return t
+    }
+
     /// 自己分配内存的 CGBitmapContext（data: nil 交给 CoreGraphics 管）
     static func makeContext(width: Int, height: Int,
                             space: CGColorSpace, info: UInt32) -> CGContext? {
