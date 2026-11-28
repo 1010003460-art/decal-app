@@ -2,6 +2,7 @@ name: Probe Depth Model
 
 # 一次性用途：确认 apple/coreml-depth-anything-v2-small 的实际输入输出签名。
 # 不猜 shape / 字段名 —— 猜错就是整条推理链错的。
+# 用 Swift + CoreML 读描述，而不是 coremltools：这是 App 里真正看到的那个签名。
 # 拿到结果后这个 workflow 可以删。
 
 on:
@@ -17,70 +18,70 @@ jobs:
       - name: Download model from Hugging Face
         run: |
           set -euo pipefail
-          python3 -m pip install -q --upgrade pip huggingface_hub
-          python3 - <<'EOF'
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q --upgrade pip huggingface_hub
+          /tmp/venv/bin/python - <<'EOF'
           from huggingface_hub import snapshot_download
           p = snapshot_download(
               "apple/coreml-depth-anything-v2-small",
               allow_patterns=["DepthAnythingV2SmallF16.mlpackage/*"],
               local_dir="/tmp/model",
-              local_dir_use_symlinks=False,
           )
           print("downloaded ->", p)
           EOF
           du -sh /tmp/model/DepthAnythingV2SmallF16.mlpackage
-          ls -la /tmp/model/DepthAnythingV2SmallF16.mlpackage
+          find /tmp/model/DepthAnythingV2SmallF16.mlpackage -maxdepth 3 -type f | head -20
 
-      - name: Print input/output spec
+      - name: Print CoreML description via Swift
         run: |
           set -euo pipefail
-          python3 -m pip install -q coremltools
-          python3 - <<'EOF'
-          import coremltools as ct
-          p = "/tmp/model/DepthAnythingV2SmallF16.mlpackage"
-          m = ct.models.MLModel(p)
-          s = m.get_spec()
+          cat > /tmp/probe.swift <<'EOF'
+          import Foundation
+          import CoreML
+
+          let pkg = URL(fileURLWithPath: "/tmp/model/DepthAnythingV2SmallF16.mlpackage")
+          let compiled = try MLModel.compileModel(at: pkg)
+          print("compiled ->", compiled.path)
+          let cfg = MLModelConfiguration()
+          cfg.computeUnits = .cpuOnly
+          let m = try MLModel(contentsOf: compiled, configuration: cfg)
+          let d = m.modelDescription
           print("=== inputs ===")
-          for i in s.description.input:
-              print(f"  name={i.name!r}  type={i.type}")
-              if i.type.WhichOneof("Type") == "imageType":
-                  it = i.type.imageType
-                  print(f"    width={it.width} height={it.height} colorspace={it.colorSpace}")
-              if i.type.WhichOneof("Type") == "multiArrayType":
-                  ma = i.type.multiArrayType
-                  print(f"    shape={list(ma.shape)} dtype={ma.dataType}")
+          for (k, v) in d.inputDescriptionsByName {
+              print("  \(k):", v.type, v.multiArrayConstraint?.shape ?? [], v.multiArrayConstraint?.dataType.rawValue ?? -1,
+                    "image:", v.imageConstraint.map { "\($0.pixelsWide)x\($0.pixelsHigh)" } ?? "-")
+          }
           print("=== outputs ===")
-          for o in s.description.output:
-              print(f"  name={o.name!r}  type={o.type}")
-              if o.type.WhichOneof("Type") == "multiArrayType":
-                  ma = o.type.multiArrayType
-                  print(f"    shape={list(ma.shape)} dtype={ma.dataType}")
+          for (k, v) in d.outputDescriptionsByName {
+              print("  \(k):", v.type, v.multiArrayConstraint?.shape ?? [], v.multiArrayConstraint?.dataType.rawValue ?? -1)
+          }
           print("=== metadata ===")
-          print("  author:", s.description.metadata.author)
-          print("  short:", s.description.metadata.shortDescription)
-          print("  version:", s.description.metadata.versionString)
-          # 各层名称里带 depth 的，确认输出通道含义
-          names = [l.name for l in s.neuralNetwork.layers] if s.HasField("neuralNetwork") else []
-          print("  layers:", len(names))
-          print("  tail:", names[-6:])
-          EOF
+          print("  author:", d.metadata[.author] ?? "-")
+          print("  short:", d.metadata[.shortDescription] ?? "-")
+          print("  version:", d.metadata[.versionString] ?? "-")
+          print("  creator:", d.creator ?? "-")
 
-      - name: Check whether a traced forward pass runs on CPU
-        run: |
-          set -euo pipefail
-          python3 - <<'EOF'
-          import numpy as np, coremltools as ct
-          p = "/tmp/model/DepthAnythingV2SmallF16.mlpackage"
-          cfg = ct.ComputeUnit.CPU_ONLY
-          m = ct.models.MLModel(p, compute_units=cfg)
-          spec = m.get_spec()
-          inp = spec.description.input[0]
-          shape = [int(d) for d in inp.type.multiArrayType.shape] if inp.type.WhichOneof("Type") == "multiArrayType" else None
-          print("input name", inp.name, "shape", shape)
-          if shape:
-              x = np.random.rand(*shape).astype(np.float32)
-              out = m.predict({inp.name: x})
-              for k, v in out.items():
-                  a = np.asarray(v)
-                  print(f"  out {k}: shape={a.shape} dtype={a.dtype} min={a.min():.6f} max={a.max():.6f} mean={a.mean():.6f}")
+          // 真跑一次：随机输入，看输出形状与数值范围
+          if let (name, desc) = d.inputDescriptionsByName.first(where: { $0.value.multiArrayConstraint != nil }),
+             let shape = desc.multiArrayConstraint?.shape {
+              let dims = shape.map { $0.intValue }
+              let count = dims.reduce(1, *)
+              var vals = [Float](repeating: 0, count: count)
+              for i in 0..<count { vals[i] = Float.random(in: 0...1) }
+              let arr = try MLMultiArray(shape: dims.map { NSNumber(value: $0) }, dataType: .float32)
+              for i in 0..<count { arr[i] = NSNumber(value: vals[i]) }
+              let prov = try MLDictionaryFeatureProvider(dictionary: [name: MLFeatureValue(multiArray: arr)])
+              let out = try m.prediction(from: prov)
+              print("=== forward pass (random input) ===")
+              for fname in out.featureNames {
+                  if let ma = out.featureValue(for: fname)?.multiArrayValue {
+                      var mn = Float.greatestFiniteMagnitude, mx = -Float.greatestFiniteMagnitude, sum: Double = 0
+                      for i in 0..<ma.count { let v = ma[i].floatValue; mn = min(mn, v); mx = max(mx, v); sum += Double(v) }
+                      print("  \(fname): shape=\(ma.shape) dtype=\(ma.dataType.rawValue) min=\(mn) max=\(mx) mean=\(sum / Double(ma.count))")
+                  }
+              }
+          } else {
+              print("no multiArray input found")
+          }
           EOF
+          swiftc -O /tmp/probe.swift -o /tmp/probe && /tmp/probe
