@@ -13,6 +13,8 @@ iPhone 原生 App：SwiftUI 界面 + Metal 着色器，无 WebView。自签安�
         ↓
    四点单应矩阵 H（单位方 → 图像四角）        Homography.swift
         ↓
+   Depth Anything V2 Small → 相对深度图       DepthModel.swift
+        ↓
    逐像素逆采样：屏幕像素 → 图像像素 → 平面 uv → 贴花坐标
         ↓                                    Shaders.metal
    L1 光照融合（低频光照场 + 两端降饱和）+ 接触阴影
@@ -20,8 +22,18 @@ iPhone 原生 App：SwiftUI 界面 + Metal 着色器，无 WebView。自签安�
    一次 draw call 出图；导出时同样的 shader 渲到 4096 内的离屏纹理
 ```
 
-**为什么不用 3D / 不用深度模型**：贴花只落在用户指定的平面上，而平面→图像是一个
-精确的单应变换。没有跨面、没有参数化不连续、没有收边门限，透视缩短由 H 自带。
+**平面为什么不需要 3D**：贴花只落在用户指定的平面上，而平面→图像是一个精确的
+单应变换，透视缩短由 H 自带，不需要建模。
+
+**曲面为什么必须靠深度**：平面单应等价于**正交投影**。圆柱上的点在屏幕上位置是
+`R·sinθ`，而它正交投影到切平面上的坐标也是 `R·sinθ` —— 两者线性相关，所以贴花
+在曲面上**永远不变形**，不管单应算得多准。真实贴纸不可拉伸，内容按**弧长** `R·θ`
+分布，投影到屏幕后边缘才会被压缩。`sinθ` vs `θ` 就是「贴了张幻灯片」和「贴纸卷上去」
+的区别，这个差别平面数学给不出来。
+
+**深度模型现状**：`apple/coreml-depth-anything-v2-small` 已接进 App（49.8MB，
+输入 518×392，输出 `depth` 是 **image 类型**不是数组，相对深度 0..1）。
+当前只做**推理 + 可视化**（画布上的「深度」开关），弧长扭曲是下一步。
 
 **为什么用 Metal 而不是 Web**：同一套数学，原生能直接吃 CoreML（后面接深度遮挡）、
 系统分享、原生手势；也不再依赖 WKWebView 的 60fps 节流与内存上限。
@@ -34,8 +46,10 @@ Decal/
   Editor.swift        状态 + 几何 + Metal 管线 + 导出（原 decal.html 的 700 行 JS）
   Homography.swift    行主序 Mat3 + 8×8 高斯消元
   ContentView.swift   SwiftUI 面板 + Canvas 手柄 + PhotosPicker
+  DepthModel.swift    深度推理（只依赖 CoreML，CI 里能直接编译跑）
   DecalApp.swift      入口
   decal.html          Web 参考实现，**不进包**（旧版 WKWebView 外壳用的，留作对照/将来做安卓）
+Model/                深度模型占位目录（.mlmodelc 由 CI 用 coremlcompiler 现编，不入库）
 project.yml           XcodeGen 工程描述
 test/                 验证脚本（素材与产物已 gitignore）
 verify_homography.mjs 单应数学自检（与 Swift 侧同算法）
@@ -51,6 +65,8 @@ verify_homography.mjs 单应数学自检（与 Swift 侧同算法）
 | 导出 | 4096 上限离屏渲染 | Web 版 21ms；原生版待测 |
 | 光照层数学 | `test/light_check.py`（纯标准库，进 CI） | 亮度守恒 2e-16、饱和度只降不升、shade=0 完整退化 |
 | 光照层视觉 | `test/light_demo.py` 合成侧光砖墙 + 白贴纸 | 旧版白纸上透出砖缝格线（半透明感），新版实心且跟随明暗 |
+| 深度模型 | `test/DepthBootCheck.swift`（CI，5 秒，编真源码） | 加载 652ms / 推理 675ms / 518×392 / 值域 0.033..1.000 / 瓶身 0.799 vs 背景 0.059 |
+| 深度可视化 | 模拟器 UI 测试 `testDepthPreviewTurnsPhotoGrayscale` | 点「深度」后照片带饱和色比例掉到 <25%，贴花被顶掉 |
 | 编译 | GitHub Actions macOS runner | 通过，`default.metallib` 已入包 |
 
 **未验证**：原生版尚未真机跑过（构建机是 Windows，没有模拟器）。
